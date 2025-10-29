@@ -1,8 +1,6 @@
 streamlit==1.28.0
 pandas==2.0.3
 numpy==1.24.3
-python-binance==1.0.17
+ccxt==3.0.63
 requests==2.31.0
 pytz==2023.3
-prophet==1.1.5
-pystan==2.19.1.1

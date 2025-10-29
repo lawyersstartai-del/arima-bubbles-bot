@@ -9,9 +9,9 @@ TELEGRAM_BOT_TOKEN = "5628451765:AAF3eghUBVePX-I_j3Rg2WvWKFGkx4u1F7M"
 TELEGRAM_CHAT_ID = "204683255"
 MOSCOW_TZ = pytz.timezone('Europe/Moscow')
 
-st.set_page_config(page_title="ARIMA + Bubbles", page_icon="📊", layout="wide")
+st.set_page_config(page_title="ARIMA Bot", page_icon="📊", layout="wide")
 st.title("📊 ARIMA + Market Order Bubbles")
-st.markdown("**Prophet ARIMA + Telegram отправка каждый час на XX:02**")
+st.markdown("**Прогноз + Telegram отправка каждый час на XX:02**")
 
 with st.sidebar:
     st.title("⚙️ Параметры")
@@ -21,7 +21,7 @@ with st.sidebar:
     days_history = st.slider("Дней истории", 7, 365, 30)
     st.divider()
     st.success("✅ Telegram подключен")
-    st.info("⏰ Московское время (UTC+3)\n📤 Автоотправка: XX:02")
+    st.info("⏰ Московское время (UTC+3)\n📤 Автоотправка: XX:02\n📊 ARIMA прогноз")
 
 if 'last_send_hour' not in st.session_state:
     st.session_state.last_send_hour = -1
@@ -33,67 +33,51 @@ def get_moscow_time():
 
 def get_historical_klines(symbol, interval, days):
     try:
-        from binance.spot import Spot as Client
-        client = Client()
+        import ccxt
+        exchange = ccxt.binance()
         
-        start_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
-        start_ts = int(datetime.strptime(start_date, "%Y-%m-%d").timestamp() * 1000)
+        timeframe_map = {'1h': '1h', '4h': '4h', '1d': '1d'}
+        tf = timeframe_map.get(interval, '1h')
         
-        df = pd.DataFrame()
-        limit = 1000
+        all_candles = []
+        since = exchange.parse8601((datetime.now() - timedelta(days=days)).isoformat())
         
-        while True:
-            klines = client.klines(symbol=symbol, interval=interval, startTime=start_ts, limit=limit)
-            if not klines:
+        while since < exchange.milliseconds():
+            candles = exchange.fetch_ohlcv(symbol, tf, since, limit=1000)
+            if not candles:
                 break
-            
-            temp_df = pd.DataFrame(klines, columns=[
-                'Open time', 'Open', 'High', 'Low', 'Close', 'Volume',
-                'Close time', 'Quote asset volume', 'Number of trades',
-                'Taker buy base asset volume', 'Taker buy quote asset volume', 'Ignore'
-            ])
-            df = pd.concat([df, temp_df], ignore_index=True)
-            
-            last_open_time = int(temp_df['Open time'].iloc[-1])
-            if len(klines) < limit:
-                break
-            start_ts = last_open_time + 1
+            all_candles.extend(candles)
+            since = candles[-1][0] + 1
         
-        df['Open time'] = pd.to_datetime(df['Open time'], unit='ms')
-        for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
-            df[col] = df[col].astype(float)
-        
+        df = pd.DataFrame(all_candles, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
+        df['Open time'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df = df[['Open time', 'Open', 'High', 'Low', 'Close', 'Volume']]
         df.drop_duplicates(subset=['Open time'], inplace=True)
         df.reset_index(drop=True, inplace=True)
         
         return df
     except Exception as e:
-        st.error(f"Ошибка: {str(e)}")
+        st.error(f"Ошибка загрузки: {str(e)}")
         return None
 
 def calculate_arima_forecast(prices, forecast_steps=7):
-    """Prophet ARIMA прогноз"""
-    try:
-        from prophet import Prophet
-        
-        periods = len(prices)
-        df_prophet = pd.DataFrame({
-            'ds': pd.date_range(end=datetime.now(), periods=periods, freq='H'),
-            'y': prices
-        })
-        
-        model = Prophet(yearly_seasonality=False, daily_seasonality=False, interval_width=0.95)
-        model.fit(df_prophet)
-        
-        future = model.make_future_dataframe(periods=forecast_steps, freq='H')
-        forecast = model.predict(future)
-        
-        return np.array(forecast['yhat'].values[-forecast_steps:])
-    except:
-        # Fallback прогноз
-        recent = prices[-20:] if len(prices) >= 20 else prices
-        trend = (recent[-1] - recent[0]) / max(len(recent), 1)
-        return np.array([prices[-1] + trend * (i + 1) for i in range(forecast_steps)])
+    """Простой ARIMA-подобный прогноз"""
+    if len(prices) < 10:
+        return None
+    
+    # Используем последние 20 значений для расчета тренда
+    recent = prices[-20:]
+    
+    # Расчет простого тренда
+    x = np.arange(len(recent))
+    coeffs = np.polyfit(x, recent, 2)  # Полином 2й степени
+    poly = np.poly1d(coeffs)
+    
+    # Прогноз
+    future_x = np.arange(len(recent), len(recent) + forecast_steps)
+    forecast = poly(future_x)
+    
+    return forecast
 
 def calculate_bubbles(df):
     df = df.copy()
@@ -241,4 +225,4 @@ if st.session_state.messages_sent:
 
 st.markdown("""<script>setTimeout(() => window.location.reload(), 60000);</script>""", unsafe_allow_html=True)
 st.divider()
-st.markdown("<div style='text-align:center;color:gray;font-size:11px;'>🤖 ARIMA Bubbles | Prophet + Telegram | Московское время (UTC+3)</div>", unsafe_allow_html=True)
+st.markdown("<div style='text-align:center;color:gray;font-size:11px;'>🤖 ARIMA Bubbles | CCXT + Telegram | Московское время (UTC+3)</div>", unsafe_allow_html=True)
