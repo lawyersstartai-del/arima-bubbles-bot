@@ -11,14 +11,13 @@ MOSCOW_TZ = pytz.timezone('Europe/Moscow')
 
 st.set_page_config(page_title="ARIMA Bot", page_icon="📊", layout="wide")
 st.title("📊 ARIMA + Market Order Bubbles")
-st.markdown("**REST API + Telegram отправка каждый час на XX:02**")
+st.markdown("**Прогноз + Telegram отправка каждый час**")
 
 with st.sidebar:
     st.title("⚙️ Параметры")
     symbol = st.text_input("Символ", value="BTCUSDT")
     interval = st.selectbox("Таймфрейм", ["1h", "4h", "1d"])
     forecast_steps = st.slider("Шагов прогноза", 3, 14, 7)
-    days_history = st.slider("Дней истории", 7, 365, 30)
     st.divider()
     st.success("✅ Telegram подключен")
     st.info("⏰ Московское время (UTC+3)\n📤 Автоотправка: XX:02")
@@ -31,8 +30,7 @@ if 'messages_sent' not in st.session_state:
 def get_moscow_time():
     return datetime.now(MOSCOW_TZ)
 
-def get_binance_klines(symbol, interval, days):
-    """Получаем свечи с Binance REST API"""
+def get_binance_klines(symbol, interval):
     try:
         interval_map = {'1h': '1h', '4h': '4h', '1d': '1d'}
         tf = interval_map.get(interval, '1h')
@@ -45,6 +43,10 @@ def get_binance_klines(symbol, interval, days):
         }
         
         response = requests.get(url, params=params, timeout=10)
+        if response.status_code != 200:
+            st.error(f"Binance ошибка: {response.status_code}")
+            return None
+            
         klines = response.json()
         
         df = pd.DataFrame(klines, columns=[
@@ -66,7 +68,6 @@ def get_binance_klines(symbol, interval, days):
         return None
 
 def calculate_arima_forecast(prices, forecast_steps=7):
-    """Простой ARIMA-подобный прогноз"""
     if len(prices) < 10:
         return None
     
@@ -104,24 +105,40 @@ def calculate_bubbles(df):
     return df
 
 def send_telegram_message(message):
+    """Отправка сообщения в Telegram с подробной обработкой ошибок"""
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        data = {'chat_id': TELEGRAM_CHAT_ID, 'text': message, 'parse_mode': 'HTML'}
-        response = requests.post(url, data=data, timeout=30)
-        return response.json().get('ok', False)
-    except:
+        params = {
+            'chat_id': TELEGRAM_CHAT_ID,
+            'text': message,
+            'parse_mode': 'HTML'
+        }
+        
+        response = requests.post(url, params=params, timeout=30)
+        result = response.json()
+        
+        if result.get('ok'):
+            return True
+        else:
+            st.error(f"Telegram ошибка: {result.get('description', 'Unknown error')}")
+            return False
+            
+    except Exception as e:
+        st.error(f"Ошибка отправки Telegram: {str(e)}")
         return False
 
 def run_analysis(symbol, interval, forecast_steps):
-    df = get_binance_klines(symbol, interval, 30)
+    df = get_binance_klines(symbol, interval)
     
     if df is None or len(df) < 100:
+        st.error("Недостаточно данных для анализа")
         return False
     
     prices = df['Close'].values
     arima_forecast = calculate_arima_forecast(prices, forecast_steps)
     
     if arima_forecast is None:
+        st.error("Ошибка расчета прогноза")
         return False
     
     df_with_bubbles = calculate_bubbles(df)
@@ -135,7 +152,7 @@ def run_analysis(symbol, interval, forecast_steps):
     msg += f"<b>Цена:</b> ${current_price:.2f}\n\n"
     
     msg += f"<b>📈 Прогноз на {forecast_steps} шагов:</b>\n"
-    for i, price in enumerate(arima_forecast, 1):
+    for i, price in enumerate(arima_forecast[:5], 1):
         change = ((price - current_price) / current_price) * 100
         arrow = "📈" if change > 0 else "📉"
         msg += f"{arrow} {i}: ${price:.2f} ({change:+.2f}%)\n"
@@ -156,8 +173,11 @@ def run_analysis(symbol, interval, forecast_steps):
     else:
         msg += "⏳ <b>ОЖИДАНИЕ</b> ➡️\n"
     
-    send_telegram_message(msg)
-    return True
+    if send_telegram_message(msg):
+        st.session_state.messages_sent.append(moscow_time)
+        return True
+    else:
+        return False
 
 # MAIN
 st.markdown("---")
@@ -172,8 +192,9 @@ if should_send:
     with st.spinner("⏳ Отправляю отчёт..."):
         if run_analysis(symbol, interval, forecast_steps):
             st.session_state.last_send_hour = current_hour
-            st.session_state.messages_sent.append(moscow_time)
             st.success(f"✅ Отчёт отправлен в {moscow_time.strftime('%H:%M:%S')} МСК")
+        else:
+            st.error("❌ Ошибка отправки")
 
 col1, col2, col3 = st.columns(3)
 with col1:
@@ -186,18 +207,16 @@ with col3:
 st.markdown("---")
 st.subheader("🚀 Ручная отправка")
 if st.button("📤 ОТПРАВИТЬ ОТЧЁТ СЕЙЧАС", use_container_width=True, type="primary"):
-    with st.spinner("⏳ Отправляю..."):
-        if run_analysis(symbol, interval, forecast_steps):
-            st.session_state.messages_sent.append(get_moscow_time())
-            st.success("✅ Отчёт отправлен!")
-        else:
-            st.error("❌ Ошибка отправки")
+    if run_analysis(symbol, interval, forecast_steps):
+        st.success("✅ Отчёт отправлен!")
+    else:
+        st.error("❌ Ошибка отправки")
 
 st.markdown("---")
 st.subheader("📊 Данные")
 
 with st.spinner("⏳ Загружаю данные..."):
-    df = get_binance_klines(symbol, interval, 30)
+    df = get_binance_klines(symbol, interval)
     
     if df is not None and len(df) > 0:
         st.write("**📊 Последние 10 свечей:**")
@@ -205,23 +224,22 @@ with st.spinner("⏳ Загружаю данные..."):
         display_df['Open time'] = display_df['Open time'].astype(str)
         st.dataframe(display_df, use_container_width=True, hide_index=True)
         
-        df_with_bubbles = calculate_bubbles(df)
-        red_count = len(df_with_bubbles[df_with_bubbles['Bubble_Type'] == 'Red'])
-        green_count = len(df_with_bubbles[df_with_bubbles['Bubble_Type'] == 'Green'])
+        prices = df['Close'].values
+        current_price = prices[-1]
+        arima_forecast = calculate_arima_forecast(prices, forecast_steps)
         
-        st.write("**🔴🟢 Статистика:**")
-        col1, col2 = st.columns(2)
-        with col1:
-            st.metric("🔴 Красные пузыри", red_count)
-        with col2:
-            st.metric("🟢 Зелёные пузыри", green_count)
+        if arima_forecast is not None:
+            st.write("**📈 Текущая цена:**", f"${current_price:.2f}")
+            st.write("**📈 Прогноз (средний):**", f"${np.mean(arima_forecast):.2f}")
 
 st.markdown("---")
 st.subheader("📤 История отправок")
 if st.session_state.messages_sent:
     data = [{"Время (МСК)": t.strftime('%Y-%m-%d %H:%M:%S')} for t in st.session_state.messages_sent[-10:]]
     st.dataframe(pd.DataFrame(data), use_container_width=True, hide_index=True)
+else:
+    st.info("Отчёты ещё не отправлялись")
 
 st.markdown("""<script>setTimeout(() => window.location.reload(), 60000);</script>""", unsafe_allow_html=True)
 st.divider()
-st.markdown("<div style='text-align:center;color:gray;font-size:11px;'>🤖 ARIMA Bubbles | Binance REST API | Telegram | Московское время</div>", unsafe_allow_html=True)
+st.markdown("<div style='text-align:center;color:gray;font-size:11px;'>🤖 ARIMA Bubbles | Binance + Telegram | Московское время</div>", unsafe_allow_html=True)
