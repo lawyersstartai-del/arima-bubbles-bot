@@ -3,46 +3,31 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 import requests
-import time
 import pytz
-import plotly.graph_objects as go
 
-# ========== TELEGRAM CREDENTIALS ==========
 TELEGRAM_BOT_TOKEN = "5628451765:AAF3eghUBVePX-I_j3Rg2WvWKFGkx4u1F7M"
 TELEGRAM_CHAT_ID = "204683255"
-
-# ========== MOSCOW TIMEZONE ==========
 MOSCOW_TZ = pytz.timezone('Europe/Moscow')
 
-# ========== PAGE CONFIG ==========
-st.set_page_config(
-    page_title="ARIMA + Market Order Bubbles",
-    page_icon="📊",
-    layout="wide"
-)
+st.set_page_config(page_title="ARIMA + Bubbles", page_icon="📊", layout="wide")
+st.title("📊 ARIMA + Market Order Bubbles")
+st.markdown("**Prophet ARIMA + Telegram отправка каждый час на XX:02**")
 
-st.title("📊 ARIMA + Market Order Bubbles (PROPHET)")
-st.markdown("**ARIMA прогноз с графиками + автоотправка в Telegram каждый час**")
-
-# ========== SIDEBAR ==========
 with st.sidebar:
     st.title("⚙️ Параметры")
     symbol = st.text_input("Символ", value="BTCUSDT")
     interval = st.selectbox("Таймфрейм", ["1h", "4h", "1d"])
     forecast_steps = st.slider("Шагов прогноза", 3, 14, 7)
     days_history = st.slider("Дней истории", 7, 365, 30)
-    
     st.divider()
     st.success("✅ Telegram подключен")
-    st.info("⏰ Часовой пояс: Москва (UTC+3)\n📤 Автоотправка: XX:02\n📊 Модель: Prophet ARIMA")
+    st.info("⏰ Московское время (UTC+3)\n📤 Автоотправка: XX:02")
 
-# ========== STATE ==========
 if 'last_send_hour' not in st.session_state:
     st.session_state.last_send_hour = -1
 if 'messages_sent' not in st.session_state:
     st.session_state.messages_sent = []
 
-# ========== HELPERS ==========
 def get_moscow_time():
     return datetime.now(MOSCOW_TZ)
 
@@ -83,161 +68,66 @@ def get_historical_klines(symbol, interval, days):
         
         return df
     except Exception as e:
-        st.error(f"Ошибка загрузки: {str(e)}")
+        st.error(f"Ошибка: {str(e)}")
         return None
 
-def calculate_arima_forecast_prophet(prices, forecast_steps=7):
-    """ARIMA-подобный прогноз используя Prophet"""
+def calculate_arima_forecast(prices, forecast_steps=7):
+    """Prophet ARIMA прогноз"""
     try:
         from prophet import Prophet
         
-        # Подготовка данных для Prophet
         periods = len(prices)
         df_prophet = pd.DataFrame({
             'ds': pd.date_range(end=datetime.now(), periods=periods, freq='H'),
             'y': prices
         })
         
-        # Модель Prophet
         model = Prophet(yearly_seasonality=False, daily_seasonality=False, interval_width=0.95)
         model.fit(df_prophet)
         
-        # Прогноз
         future = model.make_future_dataframe(periods=forecast_steps, freq='H')
         forecast = model.predict(future)
         
-        return forecast['yhat'].values[-forecast_steps:]
-    except Exception as e:
-        st.warning(f"Prophet ошибка: {str(e)}, используется простой прогноз")
-        # Fallback на простой прогноз
-        recent = prices[-20:]
-        trend = (recent[-1] - recent[0]) / len(recent)
+        return np.array(forecast['yhat'].values[-forecast_steps:])
+    except:
+        # Fallback прогноз
+        recent = prices[-20:] if len(prices) >= 20 else prices
+        trend = (recent[-1] - recent[0]) / max(len(recent), 1)
         return np.array([prices[-1] + trend * (i + 1) for i in range(forecast_steps)])
 
-def calculate_bubbles(df, stdev_length=30, ema_length=30):
+def calculate_bubbles(df):
     df = df.copy()
     df['Price_Change_Pct'] = ((df['Close'] - df['Open']) / df['Open'].replace(0, 1)) * 100
     
-    df['Volume_EMA'] = df['Volume'].ewm(span=ema_length, adjust=False).mean()
-    df['Volume_STD'] = df['Volume'].rolling(window=stdev_length).std()
+    df['Volume_EMA'] = df['Volume'].ewm(span=30, adjust=False).mean()
+    df['Volume_STD'] = df['Volume'].rolling(window=30).std()
     
     df['Upper_Threshold'] = df['Volume_EMA'] + 1.0 * df['Volume_STD']
     df['Lower_Threshold'] = df['Volume_EMA'] + 0.5 * df['Volume_STD']
     
     df['Bubble_Type'] = 'None'
-    df['Bubble_Strength'] = 0.0
     
-    for i in range(max(stdev_length, ema_length), len(df)):
+    for i in range(30, len(df)):
         current_volume = df.loc[i, 'Volume']
         current_price_change = df.loc[i, 'Price_Change_Pct']
-        upper_threshold = df.loc[i, 'Upper_Threshold']
         lower_threshold = df.loc[i, 'Lower_Threshold']
         
-        if pd.notna(upper_threshold) and pd.notna(lower_threshold):
+        if pd.notna(lower_threshold):
             if current_price_change < -0.05 and current_volume > lower_threshold:
-                strength = min(100.0, ((current_volume - lower_threshold) / (upper_threshold - lower_threshold + 0.1)) * 100)
                 df.loc[i, 'Bubble_Type'] = 'Red'
-                df.loc[i, 'Bubble_Strength'] = min(100.0, strength)
-            
             elif current_price_change > 0.05 and current_volume > lower_threshold:
-                strength = min(100.0, ((current_volume - lower_threshold) / (upper_threshold - lower_threshold + 0.1)) * 100)
                 df.loc[i, 'Bubble_Type'] = 'Green'
-                df.loc[i, 'Bubble_Strength'] = min(100.0, strength)
     
     return df
 
 def send_telegram_message(message):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        data = {
-            'chat_id': TELEGRAM_CHAT_ID,
-            'text': message,
-            'parse_mode': 'HTML'
-        }
+        data = {'chat_id': TELEGRAM_CHAT_ID, 'text': message, 'parse_mode': 'HTML'}
         response = requests.post(url, data=data, timeout=30)
         return response.json().get('ok', False)
     except:
         return False
-
-def create_candlestick_chart(df_last):
-    fig = go.Figure(data=[go.Candlestick(
-        x=df_last['Open time'],
-        open=df_last['Open'],
-        high=df_last['High'],
-        low=df_last['Low'],
-        close=df_last['Close'],
-        name='OHLC'
-    )])
-    
-    fig.update_layout(
-        title=f"Свечи {symbol}",
-        yaxis_title="Цена (USD)",
-        xaxis_title="Время",
-        template="plotly_dark",
-        height=400
-    )
-    return fig
-
-def create_volume_chart(df_last, df_with_bubbles):
-    colors = []
-    for idx in df_with_bubbles.tail(len(df_last)).index:
-        bubble_type = df_with_bubbles.loc[idx, 'Bubble_Type']
-        if bubble_type == 'Red':
-            colors.append('red')
-        elif bubble_type == 'Green':
-            colors.append('green')
-        else:
-            colors.append('steelblue')
-    
-    fig = go.Figure(data=[go.Bar(
-        x=df_last['Open time'],
-        y=df_last['Volume'],
-        marker=dict(color=colors),
-        name='Volume'
-    )])
-    
-    fig.update_layout(
-        title="Объём с пузырями",
-        yaxis_title="Объём",
-        xaxis_title="Время",
-        template="plotly_dark",
-        height=300
-    )
-    return fig
-
-def create_forecast_chart(prices, arima_forecast):
-    history = prices[-100:]
-    forecast_data = arima_forecast
-    
-    x_hist = list(range(len(history)))
-    x_fore = list(range(len(history), len(history) + len(forecast_data)))
-    
-    fig = go.Figure()
-    
-    fig.add_trace(go.Scatter(
-        x=x_hist,
-        y=history,
-        mode='lines+markers',
-        name='История',
-        line=dict(color='blue', width=2)
-    ))
-    
-    fig.add_trace(go.Scatter(
-        x=x_fore,
-        y=forecast_data,
-        mode='lines+markers',
-        name='Прогноз Prophet ARIMA',
-        line=dict(color='red', width=2, dash='dash')
-    ))
-    
-    fig.update_layout(
-        title="Прогноз ARIMA (Prophet)",
-        yaxis_title="Цена (USD)",
-        xaxis_title="Периоды",
-        template="plotly_dark",
-        height=400
-    )
-    return fig
 
 def run_analysis(symbol, interval, forecast_steps, days_history):
     df = get_historical_klines(symbol, interval, days_history)
@@ -246,7 +136,7 @@ def run_analysis(symbol, interval, forecast_steps, days_history):
         return False
     
     prices = df['Close'].values
-    arima_forecast = calculate_arima_forecast_prophet(prices, forecast_steps)
+    arima_forecast = calculate_arima_forecast(prices, forecast_steps)
     
     if arima_forecast is None:
         return False
@@ -256,14 +146,12 @@ def run_analysis(symbol, interval, forecast_steps, days_history):
     
     moscow_time = get_moscow_time()
     
-    # Заголовок
     msg = f"<b>📊 ОТЧЁТ ARIMA + BUBBLES</b>\n"
     msg += f"<b>Время (МСК):</b> {moscow_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
     msg += f"<b>{symbol}</b> | {interval}\n"
     msg += f"<b>Цена:</b> ${current_price:.2f}\n\n"
     
-    # Прогноз
-    msg += f"<b>📈 Прогноз ARIMA на {forecast_steps} шагов:</b>\n"
+    msg += f"<b>📈 Прогноз на {forecast_steps} шагов:</b>\n"
     for i, price in enumerate(arima_forecast, 1):
         change = ((price - current_price) / current_price) * 100
         arrow = "📈" if change > 0 else "📉"
@@ -271,26 +159,24 @@ def run_analysis(symbol, interval, forecast_steps, days_history):
     
     msg += "\n"
     
-    # Пузыри
     red_count = len(df_with_bubbles[df_with_bubbles['Bubble_Type'] == 'Red'])
     green_count = len(df_with_bubbles[df_with_bubbles['Bubble_Type'] == 'Green'])
     
     msg += f"<b>🔴🟢 ПУЗЫРИ:</b>\n"
     msg += f"🔴 Красные: {red_count} | 🟢 Зелёные: {green_count}\n\n"
     
-    # Рекомендация
     forecast_avg = np.mean(arima_forecast)
     if forecast_avg > current_price * 1.01:
-        msg += "🎯 <b>РЕКОМЕНДАЦИЯ: ПОКУПКА</b> 📈\n"
+        msg += "🎯 <b>ПОКУПКА</b> 📈\n"
     elif forecast_avg < current_price * 0.99:
-        msg += "🎯 <b>РЕКОМЕНДАЦИЯ: ПРОДАЖА</b> 📉\n"
+        msg += "🎯 <b>ПРОДАЖА</b> 📉\n"
     else:
-        msg += "⏳ <b>РЕКОМЕНДАЦИЯ: ОЖИДАНИЕ</b> ➡️\n"
+        msg += "⏳ <b>ОЖИДАНИЕ</b> ➡️\n"
     
     send_telegram_message(msg)
     return True
 
-# ========== MAIN ==========
+# MAIN
 st.markdown("---")
 
 moscow_time = get_moscow_time()
@@ -325,25 +211,27 @@ if st.button("📤 ОТПРАВИТЬ ОТЧЁТ СЕЙЧАС", use_container_wi
             st.error("❌ Ошибка отправки")
 
 st.markdown("---")
-st.subheader("📊 Графики")
+st.subheader("📊 Данные")
 
 with st.spinner("⏳ Загружаю данные..."):
     df = get_historical_klines(symbol, interval, days_history)
     
     if df is not None and len(df) > 0:
-        prices = df['Close'].values
-        arima_forecast = calculate_arima_forecast_prophet(prices, forecast_steps)
+        st.write("**📊 Последние 10 свечей:**")
+        display_df = df[['Open time', 'Open', 'High', 'Low', 'Close', 'Volume']].tail(10).copy()
+        display_df['Open time'] = display_df['Open time'].astype(str)
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+        
         df_with_bubbles = calculate_bubbles(df)
+        red_count = len(df_with_bubbles[df_with_bubbles['Bubble_Type'] == 'Red'])
+        green_count = len(df_with_bubbles[df_with_bubbles['Bubble_Type'] == 'Green'])
         
-        # Свечи
-        st.plotly_chart(create_candlestick_chart(df.tail(100)), use_container_width=True)
-        
-        # Объём
-        st.plotly_chart(create_volume_chart(df.tail(100), df_with_bubbles), use_container_width=True)
-        
-        # Прогноз
-        if arima_forecast is not None:
-            st.plotly_chart(create_forecast_chart(prices, arima_forecast), use_container_width=True)
+        st.write("**🔴🟢 Статистика:**")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("🔴 Красные пузыри", red_count)
+        with col2:
+            st.metric("🟢 Зелёные пузыри", green_count)
 
 st.markdown("---")
 st.subheader("📤 История отправок")
@@ -351,11 +239,6 @@ if st.session_state.messages_sent:
     data = [{"Время (МСК)": t.strftime('%Y-%m-%d %H:%M:%S')} for t in st.session_state.messages_sent[-10:]]
     st.dataframe(pd.DataFrame(data), use_container_width=True, hide_index=True)
 
-st.markdown("""
-<script>
-setTimeout(() => window.location.reload(), 60000);
-</script>
-""", unsafe_allow_html=True)
-
+st.markdown("""<script>setTimeout(() => window.location.reload(), 60000);</script>""", unsafe_allow_html=True)
 st.divider()
-st.markdown("<div style='text-align:center;color:gray;font-size:11px;'>🤖 ARIMA Bubbles Bot | Prophet + Plotly | Московское время (UTC+3)</div>", unsafe_allow_html=True)
+st.markdown("<div style='text-align:center;color:gray;font-size:11px;'>🤖 ARIMA Bubbles | Prophet + Telegram | Московское время (UTC+3)</div>", unsafe_allow_html=True)
