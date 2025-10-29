@@ -2,13 +2,16 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-from binance import Client
-from statsmodels.tsa.arima.model import ARIMA
 import requests
 import time
 import matplotlib.pyplot as plt
 import io
 import pytz
+
+try:
+    from binance import Client
+except:
+    from binance.spot import Spot as Client
 
 # ========== TELEGRAM CREDENTIALS ==========
 TELEGRAM_BOT_TOKEN = "5628451765:AAF3eghUBVePX-I_j3Rg2WvWKFGkx4u1F7M"
