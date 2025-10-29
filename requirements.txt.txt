@@ -3,6 +3,6 @@ scipy==1.11.0
 numpy==1.24.3
 pandas==2.0.3
 streamlit==1.28.0
-altair==5.0.1
 requests==2.31.0
 pytz==2023.3
+altair==5.0.1
