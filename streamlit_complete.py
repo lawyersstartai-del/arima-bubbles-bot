@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-from binance.client import Client
+from binance import Client
 from statsmodels.tsa.arima.model import ARIMA
 import requests
 import time
