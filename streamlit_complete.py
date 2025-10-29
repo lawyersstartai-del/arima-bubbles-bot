@@ -5,7 +5,6 @@ from datetime import datetime, timedelta
 import requests
 import pytz
 import altair as alt
-from sklearn.linear_model import LinearRegression
 
 TELEGRAM_BOT_TOKEN = "5628451765:AAF3eghUBVePX-I_j3Rg2WvWKFGkx4u1F7M"
 TELEGRAM_CHAT_ID = "204683255"
@@ -13,7 +12,7 @@ MOSCOW_TZ = pytz.timezone('Europe/Moscow')
 
 st.set_page_config(page_title="ARIMA Bot", page_icon="📊", layout="wide")
 st.title("📊 REAL AR(4) I(1) + Market Order Bubbles")
-st.markdown("**CoinGecko + Real AR(4) I(1) (NO POLYNOMIAL TRICKS) + Telegram**")
+st.markdown("**CoinGecko + Real AR(4) I(1) (NUMPY ONLY - NO sklearn) + Telegram**")
 
 with st.sidebar:
     st.title("⚙️ ПАРАМЕТРЫ")
@@ -41,7 +40,7 @@ with st.sidebar:
     forecast_steps = min(days if forecast_type == "Дни" else 7, 7)
     
     st.divider()
-    st.success("✅ REAL AR(4) I(1) - NO TRICKS")
+    st.success("✅ REAL AR(4) I(1) - NUMPY ONLY")
     st.info(f"📚 Обучение: {train_period}d\n🔮 Период: {forecast_period_label}\n📊 Pure Math")
 
 if 'messages_sent' not in st.session_state:
@@ -76,17 +75,30 @@ def get_coingecko_data(crypto_id, days=365):
     except:
         return None
 
+def solve_least_squares(X, y):
+    """NUMPY ONLY: Решаем нормальное уравнение вручную
+    
+    Формула: (X^T * X)^(-1) * X^T * y
+    Это КЛАССИЧЕСКИЙ способ без sklearn!
+    """
+    try:
+        X_T = X.T
+        XTX = X_T @ X  # X^T @ X
+        XTX_inv = np.linalg.inv(XTX)
+        XTy = X_T @ y  # X^T @ y
+        beta = XTX_inv @ XTy
+        return beta
+    except:
+        return None
+
 def calculate_ar4_i1(prices, forecast_steps, train_period):
-    """REAL AR(4) I(1) - ШАГИ ВЫЧИСЛЕНИЯ:
+    """REAL AR(4) I(1) - PURE NUMPY, БЕЗ sklearn
     
     1. Берём последние train_period дней
     2. DIFFERENCING I(1): y_diff = y_t - y_{t-1}
-    3. AR(4): Обучаем модель на differenced данных
-       y_diff_t = phi1*y_diff_{t-1} + phi2*y_diff_{t-2} + phi3*y_diff_{t-3} + phi4*y_diff_{t-4}
-    4. PREDICT: Шаг за шагом предсказываем differenced значения
-    5. INVERSE: Интегрируем обратно: y_t = y_{t-1} + y_diff_t
-    
-    БЕЗ ПОЛИНОМОВ, БЕЗ ВЫДУМОК - ТОЛЬКО МАТЕМАТИКА!
+    3. AR(4): Решаем нормальное уравнение на differenced данных
+    4. PREDICT: Шаг за шагом предсказываем
+    5. INVERSE: Интегрируем обратно
     """
     if len(prices) < 10:
         return None
@@ -124,17 +136,19 @@ def calculate_ar4_i1(prices, forecast_steps, train_period):
         X_train = np.array(X_train)
         y_train = np.array(y_train)
         
-        # Обучаем AR(4) модель на differenced данных
-        ar_model = LinearRegression()
-        ar_model.fit(X_train, y_train)
+        # Решаем нормальное уравнение: (X^T*X)^(-1)*X^T*y
+        coeffs = solve_least_squares(X_train, y_train)
+        
+        if coeffs is None:
+            return None
         
         # 4. PREDICT - шаг за шагом
         predicted_diff = []
         last_values = diff_data[-4:].tolist()  # Последние 4 differenced значения
         
         for step in range(forecast_steps):
-            # Предсказываем следующее differenced значение
-            next_diff = ar_model.predict([last_values])[0]
+            # Предсказываем: y_diff_t = phi1*y_diff_{t-1} + phi2*y_diff_{t-2} + ...
+            next_diff = np.dot(coeffs, last_values)
             predicted_diff.append(next_diff)
             
             # Сдвигаем окно: убираем самое старое, добавляем новое
@@ -263,13 +277,12 @@ def run_analysis(crypto_id, forecast_steps, train_period, forecast_period_label)
         msg += f"<b>{crypto_id.upper()}</b> | Период: {forecast_period_label}\n"
         msg += f"<b>💰 Цена:</b> ${current_price:,.2f}\n\n"
         
-        msg += f"<b>📚 REAL AR(4) I(1) - NO TRICKS:</b>\n"
-        msg += f"• p=4 (AR компонент - 4 шага назад)\n"
-        msg += f"• d=1 (Differencing для стационарности)\n"
-        msg += f"• БЕЗ полиномов, БЕЗ выдумок\n"
+        msg += f"<b>📚 REAL AR(4) I(1):</b>\n"
+        msg += f"• p=4 (AR компонент)\n"
+        msg += f"• d=1 (Differencing)\n"
         msg += f"• Обучение: {train_period} дней\n\n"
         
-        msg += f"<b>📊 МЕТРИКИ (RIT Research):</b>\n"
+        msg += f"<b>📊 МЕТРИКИ:</b>\n"
         msg += f"✓ RMSE: ${rmse:,.4f}\n"
         msg += f"✓ MAE: ${mae:,.4f}\n"
         msg += f"✓ MAPE: {mape:.2f}%\n\n"
@@ -306,12 +319,12 @@ with col1:
 with col2:
     st.metric("📤 Отправлено", len(st.session_state.messages_sent))
 with col3:
-    st.metric("🤖 AR(4) I(1)", "✅ REAL")
+    st.metric("🤖 AR(4) I(1)", "✅ NUMPY")
 
 st.markdown("---")
 st.subheader("🚀 Отправка в Telegram")
 if st.button("📤 ОТПРАВИТЬ ОТЧЁТ AR(4) I(1)", use_container_width=True, type="primary"):
-    with st.spinner("⏳ Обучаю REAL AR(4) I(1) - NO POLYNOMIAL TRICKS..."):
+    with st.spinner("⏳ Обучаю REAL AR(4) I(1)..."):
         if run_analysis(crypto, forecast_steps, train_period, forecast_period_label):
             st.success("✅ Отчёт отправлен в Telegram!")
         else:
@@ -359,7 +372,7 @@ with st.spinner(f"⏳ Применяю REAL AR(4) I(1) на {train_period} дн�
             forecast_data = pd.DataFrame({
                 'Period': range(len(history_prices)-1, len(history_prices)-1+len(arima_forecast)),
                 'Price': arima_forecast,
-                'Type': 'Прогноз AR(4) I(1)'
+                'Type': 'Прогноз'
             })
             
             combined = pd.concat([chart_data, forecast_data], ignore_index=True)
@@ -367,12 +380,12 @@ with st.spinner(f"⏳ Применяю REAL AR(4) I(1) на {train_period} дн�
             line_chart = alt.Chart(combined).mark_line(point=True, size=3).encode(
                 x=alt.X('Period:Q', title='Period'),
                 y=alt.Y('Price:Q', title='Price (USD)', scale=alt.Scale(zero=False)),
-                color=alt.Color('Type:N', scale=alt.Scale(domain=['История', 'Прогноз AR(4) I(1)'], range=['#1f77b4', '#ff7f0e'])),
+                color=alt.Color('Type:N', scale=alt.Scale(domain=['История', 'Прогноз'], range=['#1f77b4', '#ff7f0e'])),
                 tooltip=['Period:Q', 'Price:Q', 'Type:N']
             ).properties(
                 width=800,
                 height=400,
-                title=f'{crypto.upper()} - REAL AR(4) I(1) - NO POLYNOMIAL TRICKS'
+                title=f'{crypto.upper()} - REAL AR(4) I(1) - NUMPY ONLY'
             ).interactive()
             
             st.altair_chart(line_chart, use_container_width=True)
@@ -394,19 +407,17 @@ with st.spinner(f"⏳ Применяю REAL AR(4) I(1) на {train_period} дн�
         ).properties(
             width=800,
             height=300,
-            title='Volume Bubbles - Red (Bearish) / Green (Bullish)'
+            title='Volume Bubbles'
         ).interactive()
         
         st.altair_chart(bar_chart, use_container_width=True)
         
         # Инфо о AR(4) I(1)
         st.info("""
-        **ℹ️ REAL AR(4) I(1) -純數學 (Pure Math):**
-        - **p=4**: Autoregressive - используем 4 прошлых differenced значения
-        - **d=1**: Differencing - одно дифференцирование для стационарности
-        - **NO TRICKS**: БЕЗ полиномов, БЕЗ выдумок для красоты
-        - **ЧЕСТНЫЙ прогноз**: Прямая будет прямой, кривая будет кривой
-        - **Как в реальности**: То что показывает модель - то и будет
+        **ℹ️ REAL AR(4) I(1) - NUMPY ONLY:**
+        - **Без sklearn** - только встроенные функции NumPy
+        - **Нормальное уравнение**: (X^T*X)^(-1)*X^T*y
+        - **Pure Math** - честный расчет коэффициентов
         """)
         
         # Таблица
