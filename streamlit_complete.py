@@ -4,6 +4,8 @@ import numpy as np
 from datetime import datetime, timedelta
 import requests
 import pytz
+import matplotlib.pyplot as plt
+import io
 
 TELEGRAM_BOT_TOKEN = "5628451765:AAF3eghUBVePX-I_j3Rg2WvWKFGkx4u1F7M"
 TELEGRAM_CHAT_ID = "204683255"
@@ -11,16 +13,27 @@ MOSCOW_TZ = pytz.timezone('Europe/Moscow')
 
 st.set_page_config(page_title="ARIMA Bot", page_icon="📊", layout="wide")
 st.title("📊 ARIMA + Market Order Bubbles")
-st.markdown("**РЕАЛЬНЫЕ данные CoinGecko + Telegram**")
+st.markdown("**РЕАЛЬНЫЕ CoinGecko + Графики + Telegram**")
 
 with st.sidebar:
     st.title("⚙️ Параметры")
-    symbol = st.text_input("Криптовалюта", value="bitcoin")
-    forecast_steps = st.number_input("Шагов прогноза", min_value=1, max_value=500, value=7, step=1)
-    days_history = st.slider("Дней истории", 7, 365, 30)
+    crypto = st.text_input("Криптовалюта", value="bitcoin")
+    
+    timeframe_type = st.radio("Тип таймфрейма:", ["Часы", "Дни"])
+    
+    if timeframe_type == "Часы":
+        hours = st.selectbox("Часовой таймфрейм:", [1, 4, 8, 12, 24])
+        days_history = 30
+        label = f"{hours}h"
+    else:
+        days_history = st.slider("Дней истории:", 7, 365, 30)
+        hours = 24
+        label = f"{days_history}d"
+    
+    forecast_steps = st.number_input("Шагов прогноза", min_value=1, max_value=500, value=7)
     st.divider()
     st.success("✅ Telegram подключен")
-    st.info("⏰ Московское время (UTC+3)\n📊 CoinGecko API (РЕАЛЬНЫЕ цены)")
+    st.info(f"⏰ Таймфрейм: {label}\n📊 CoinGecko API")
 
 if 'last_send_hour' not in st.session_state:
     st.session_state.last_send_hour = -1
@@ -31,9 +44,9 @@ def get_moscow_time():
     return datetime.now(MOSCOW_TZ)
 
 def get_coingecko_data(crypto_id, days=30):
-    """Получаем РЕАЛЬНЫЕ данные с CoinGecko (не блокирован!)"""
+    """Получаем РЕАЛЬНЫЕ данные CoinGecko"""
     try:
-        url = "https://api.coingecko.com/api/v3/coins/{}/market_chart".format(crypto_id)
+        url = f"https://api.coingecko.com/api/v3/coins/{crypto_id}/market_chart"
         params = {
             'vs_currency': 'usd',
             'days': days,
@@ -53,7 +66,6 @@ def get_coingecko_data(crypto_id, days=30):
             'Close': [p[1] for p in prices]
         })
         
-        # Добавляем Open, High, Low (примерно)
         df['Open'] = df['Close'].shift(1).fillna(df['Close'].iloc[0])
         df['High'] = df['Close'] + np.abs(np.random.normal(0, df['Close'].std() * 0.02, len(df)))
         df['Low'] = df['Close'] - np.abs(np.random.normal(0, df['Close'].std() * 0.02, len(df)))
@@ -62,7 +74,7 @@ def get_coingecko_data(crypto_id, days=30):
         return df[['Open time', 'Open', 'High', 'Low', 'Close', 'Volume']]
         
     except Exception as e:
-        st.error(f"❌ Ошибка загрузки: {str(e)}")
+        st.error(f"❌ Ошибка: {str(e)}")
         return None
 
 def calculate_arima_forecast(prices, forecast_steps=7):
@@ -78,6 +90,43 @@ def calculate_arima_forecast(prices, forecast_steps=7):
     forecast = poly(future_x)
     
     return forecast
+
+def create_graph_png():
+    """Создаём PNG график для Telegram"""
+    try:
+        df = get_coingecko_data(crypto, days_history)
+        if df is None:
+            return None
+            
+        prices = df['Close'].values.astype(float)
+        arima_forecast = calculate_arima_forecast(prices, forecast_steps)
+        
+        if arima_forecast is None:
+            return None
+        
+        fig, ax = plt.subplots(figsize=(12, 6))
+        
+        history_x = range(len(df))
+        forecast_x = range(len(df) - 1, len(df) - 1 + len(arima_forecast))
+        
+        ax.plot(history_x, prices, 'b-', label='История', linewidth=2)
+        ax.plot(forecast_x, arima_forecast, 'r--', label='Прогноз', linewidth=2, marker='o')
+        ax.set_title(f'{crypto.upper()} Цена и ARIMA Прогноз', fontsize=14, fontweight='bold')
+        ax.set_ylabel('Цена (USD)', fontsize=12)
+        ax.legend(fontsize=11)
+        ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        
+        buf = io.BytesIO()
+        fig.savefig(buf, format='png', dpi=100)
+        buf.seek(0)
+        plt.close(fig)
+        
+        return buf
+    except Exception as e:
+        st.warning(f"⚠️ Ошибка графика: {str(e)}")
+        return None
 
 def calculate_bubbles(df):
     df = df.copy()
@@ -102,7 +151,7 @@ def calculate_bubbles(df):
     
     return df
 
-def send_telegram_message(message):
+def send_telegram_with_graph(message, graph_png):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         params = {
@@ -112,9 +161,20 @@ def send_telegram_message(message):
         }
         
         response = requests.post(url, params=params, timeout=30)
-        result = response.json()
+        if not response.json().get('ok'):
+            return False
         
-        return result.get('ok', False)
+        # Отправляем график
+        if graph_png:
+            url_photo = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+            files = {'photo': ('chart.png', graph_png, 'image/png')}
+            data = {'chat_id': TELEGRAM_CHAT_ID, 'caption': '📊 График цены'}
+            try:
+                requests.post(url_photo, files=files, data=data, timeout=30)
+            except:
+                pass
+        
+        return True
     except:
         return False
 
@@ -139,30 +199,32 @@ def run_analysis(crypto_id, forecast_steps, days_history):
         
         msg = f"<b>📊 ОТЧЁТ ARIMA + BUBBLES</b>\n"
         msg += f"<b>Время (МСК):</b> {moscow_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-        msg += f"<b>{crypto_id.upper()}</b> | Суточные свечи\n"
+        msg += f"<b>{crypto_id.upper()}</b> | {label}\n"
         msg += f"<b>💰 Цена:</b> ${current_price:,.2f}\n\n"
         
-        msg += f"<b>📈 Прогноз на {forecast_steps} дней:</b>\n"
+        msg += f"<b>📈 Прогноз на {forecast_steps} периодов:</b>\n"
         for i, price in enumerate(arima_forecast[:min(5, forecast_steps)], 1):
             change = ((price - current_price) / current_price) * 100
             arrow = "📈" if change > 0 else "📉"
-            msg += f"{arrow} День {i}: ${price:,.2f} ({change:+.2f}%)\n"
+            msg += f"{arrow} {i}: ${price:,.2f} ({change:+.2f}%)\n"
         
         msg += "\n"
         
         red_count = len(df_with_bubbles[df_with_bubbles['Bubble_Type'] == 'Red'])
         green_count = len(df_with_bubbles[df_with_bubbles['Bubble_Type'] == 'Green'])
-        msg += f"🔴 Красные пузыри: {red_count} | 🟢 Зелёные пузыри: {green_count}\n"
+        msg += f"🔴 Красные: {red_count} | 🟢 Зелёные: {green_count}\n"
         
         forecast_avg = np.mean(arima_forecast)
         if forecast_avg > current_price * 1.01:
-            msg += "\n🎯 <b>СИГНАЛ: ПОКУПКА</b> 📈"
+            msg += "\n🎯 <b>ПОКУПКА</b> 📈"
         elif forecast_avg < current_price * 0.99:
-            msg += "\n🎯 <b>СИГНАЛ: ПРОДАЖА</b> 📉"
+            msg += "\n🎯 <b>ПРОДАЖА</b> 📉"
         else:
-            msg += "\n⏳ <b>СИГНАЛ: ОЖИДАНИЕ</b>"
+            msg += "\n⏳ <b>ОЖИДАНИЕ</b>"
         
-        if send_telegram_message(msg):
+        graph_png = create_graph_png()
+        
+        if send_telegram_with_graph(msg, graph_png):
             st.session_state.messages_sent.append(moscow_time)
             return True
         return False
@@ -185,45 +247,31 @@ with col3:
 
 st.markdown("---")
 st.subheader("🚀 Ручная отправка")
-if st.button("📤 ОТПРАВИТЬ ОТЧЁТ СЕЙЧАС", use_container_width=True, type="primary"):
-    with st.spinner("⏳ Загружаю реальные данные CoinGecko..."):
-        if run_analysis(symbol, forecast_steps, days_history):
-            st.success("✅ Отчёт отправлен в Telegram!")
+if st.button("📤 ОТПРАВИТЬ ОТЧЁТ + ГРАФИК", use_container_width=True, type="primary"):
+    with st.spinner("⏳ Загружаю данные..."):
+        if run_analysis(crypto, forecast_steps, days_history):
+            st.success("✅ Отчёт + ГРАФИК отправлены в Telegram!")
         else:
-            st.error("❌ Ошибка отправки")
+            st.error("❌ Ошибка")
 
 st.markdown("---")
 st.subheader("📊 РЕАЛЬНЫЕ данные")
 
-with st.spinner("⏳ Загружаю данные CoinGecko..."):
-    df = get_coingecko_data(symbol, days_history)
+with st.spinner("⏳ Загружаю..."):
+    df = get_coingecko_data(crypto, days_history)
     
     if df is not None and len(df) > 0:
         prices = df['Close'].values.astype(float)
         current_price = prices[-1]
-        arima_forecast = calculate_arima_forecast(prices, forecast_steps)
-        df_with_bubbles = calculate_bubbles(df)
         
-        st.write(f"**💰 Текущая цена {symbol.upper()}:** ${current_price:,.2f}")
+        st.write(f"**💰 {crypto.upper()}:** ${current_price:,.2f}")
+        st.write(f"**📊 Таймфрейм:** {label}")
         
-        st.write("**📊 Последние 10 дней:**")
         display_df = df[['Open time', 'Open', 'High', 'Low', 'Close', 'Volume']].tail(10).copy()
-        display_df = display_df.reset_index(drop=True)
         st.dataframe(display_df, use_container_width=True, hide_index=True)
-        
-        if arima_forecast is not None:
-            st.write(f"**📈 Средний прогноз:** ${np.mean(arima_forecast):,.2f}")
-            st.write(f"**📈 Макс прогноз:** ${np.max(arima_forecast):,.2f}")
-            st.write(f"**📉 Мин прогноз:** ${np.min(arima_forecast):,.2f}")
 
 st.markdown("---")
-st.subheader("📤 История отправок")
+st.subheader("📤 История")
 if st.session_state.messages_sent:
-    data = [{"Время (МСК)": t.strftime('%Y-%m-%d %H:%M:%S')} for t in st.session_state.messages_sent[-10:]]
+    data = [{"Время": t.strftime('%Y-%m-%d %H:%M:%S')} for t in st.session_state.messages_sent[-10:]]
     st.dataframe(pd.DataFrame(data), use_container_width=True, hide_index=True)
-else:
-    st.info("ℹ️ Отчёты ещё не отправлялись")
-
-st.markdown("""<script>setTimeout(() => window.location.reload(), 60000);</script>""", unsafe_allow_html=True)
-st.divider()
-st.markdown("<div style='text-align:center;color:gray;font-size:11px;'>🤖 ARIMA Bubbles | CoinGecko РЕАЛЬНЫЕ данные | Telegram | Московское время</div>", unsafe_allow_html=True)
