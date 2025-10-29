@@ -12,7 +12,7 @@ MOSCOW_TZ = pytz.timezone('Europe/Moscow')
 
 st.set_page_config(page_title="ARIMA Bot", page_icon="📊", layout="wide")
 st.title("📊 ARIMA + Market Order Bubbles")
-st.markdown("**CoinGecko + Altair Графики (TradingView стиль) + Telegram**")
+st.markdown("**CoinGecko + Altair + Улучшенный ARIMA (50% окно) + Telegram**")
 
 with st.sidebar:
     st.title("⚙️ ПАРАМЕТРЫ")
@@ -41,7 +41,7 @@ with st.sidebar:
     
     st.divider()
     st.success("✅ Telegram подключен")
-    st.info(f"📚 Обучение: {train_period}d\n🔮 Период: {forecast_period_label}\n📊 Altair Charts")
+    st.info(f"📚 Обучение: {train_period}d\n🔮 Период: {forecast_period_label}\n📊 Altair + 50% Window")
 
 if 'messages_sent' not in st.session_state:
     st.session_state.messages_sent = []
@@ -76,23 +76,31 @@ def get_coingecko_data(crypto_id, days=365):
         return None
 
 def calculate_arima_forecast(prices, forecast_steps, train_period):
+    """ARIMA с окном 50% от периода обучения (минимум 50 дней)"""
     if len(prices) < 10:
         return None
     
+    # Берём ПОСЛЕДНИЕ train_period дней для обучения
     train_data = prices[-train_period:] if len(prices) > train_period else prices
     
     if len(train_data) < 10:
         return None
     
-    recent = train_data[-20:] if len(train_data) >= 20 else train_data
+    # ПОСЛЕДНИЕ 50% периода обучения (или минимум 50 дней)
+    window_size = max(50, len(train_data) // 2)
+    recent = train_data[-window_size:] if len(train_data) > window_size else train_data
+    
+    # Строим полином 2-й степени
     x = np.arange(len(recent))
     coeffs = np.polyfit(x, recent, 2)
     poly = np.poly1d(coeffs)
     
+    # Предсказываем вперед
     future_x = np.arange(len(recent), len(recent) + forecast_steps)
     return poly(future_x)
 
 def calculate_accuracy(prices, forecast, train_period):
+    """Расчет точности прогноза на периоде обучения"""
     if len(prices) < 20:
         return None, None, None
     
@@ -104,6 +112,9 @@ def calculate_accuracy(prices, forecast, train_period):
     
     train = train_data[:-test_size]
     test = train_data[-test_size:]
+    
+    if len(train) < 3:
+        return None, None, None
     
     x = np.arange(len(train))
     coeffs = np.polyfit(x, train, 2)
@@ -120,6 +131,7 @@ def calculate_accuracy(prices, forecast, train_period):
     return rmse, mae, accuracy
 
 def calculate_bubbles(df):
+    """Определяет RED и GREEN пузыри"""
     df = df.copy()
     df['Price_Change_Pct'] = ((df['Close'] - df['Open']) / df['Open'].replace(0, 1)) * 100
     
@@ -139,6 +151,7 @@ def calculate_bubbles(df):
     return df
 
 def send_telegram_message(message):
+    """Отправляет текстовый отчёт в Telegram"""
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         params = {'chat_id': TELEGRAM_CHAT_ID, 'text': message, 'parse_mode': 'HTML'}
@@ -148,6 +161,7 @@ def send_telegram_message(message):
         return False
 
 def get_recommendation(forecast, current_price, accuracy):
+    """Определяет сигнал ПОКУПКА/ПРОДАЖА/ОЖИДАНИЕ"""
     forecast_avg = np.mean(forecast)
     change_pct = ((forecast_avg - current_price) / current_price) * 100
     
@@ -166,6 +180,7 @@ def get_recommendation(forecast, current_price, accuracy):
         return "⏳ ОЖИДАНИЕ"
 
 def run_analysis(crypto_id, forecast_steps, train_period, forecast_period_label):
+    """Основной анализ - загрузка, обучение, отправка в ТГ"""
     try:
         df = get_coingecko_data(crypto_id, 365)
         
@@ -218,7 +233,8 @@ def run_analysis(crypto_id, forecast_steps, train_period, forecast_period_label)
         st.error(f"Ошибка: {str(e)}")
         return False
 
-# MAIN
+# ============ MAIN ============
+
 st.markdown("---")
 
 moscow_time = get_moscow_time()
@@ -234,7 +250,7 @@ with col3:
 st.markdown("---")
 st.subheader("🚀 Отправка в Telegram")
 if st.button("📤 ОТПРАВИТЬ ОТЧЁТ", use_container_width=True, type="primary"):
-    with st.spinner("⏳ Загружаю данные, обучаю ARIMA..."):
+    with st.spinner("⏳ Загружаю данные, обучаю ARIMA (50% окно)..."):
         if run_analysis(crypto, forecast_steps, train_period, forecast_period_label):
             st.success("✅ Отчёт отправлен в Telegram!")
         else:
@@ -252,6 +268,7 @@ with st.spinner(f"⏳ Загружаю данные и обучаю ARIMA на {
         df_bubbles = calculate_bubbles(df)
         rmse, mae, accuracy = calculate_accuracy(prices, arima_forecast, train_period)
         
+        # Метрики
         col1, col2, col3, col4 = st.columns(4)
         with col1:
             st.metric("💰 Цена", f"${prices[-1]:,.2f}")
@@ -262,37 +279,38 @@ with st.spinner(f"⏳ Загружаю данные и обучаю ARIMA на {
         with col4:
             st.metric("📚 Обучение", f"{train_period}d")
         
+        # Рекомендация
         if arima_forecast is not None:
             recommendation = get_recommendation(arima_forecast, prices[-1], accuracy)
             st.write(f"### {recommendation}")
         
-        # ГРАФИК ЦЕНЫ В СТИЛЕ TRADINGVIEW
+        # ГРАФИК ЦЕНЫ (TradingView стиль)
         st.write("**📈 ГРАФИК - История и Прогноз (TradingView стиль):**")
         
         history_prices = prices[-50:]
         chart_data = pd.DataFrame({
             'Period': range(len(history_prices)),
-            'History': history_prices,
+            'Price': history_prices,
             'Type': 'История'
         })
         
         forecast_data = pd.DataFrame({
             'Period': range(len(history_prices)-1, len(history_prices)-1+len(arima_forecast)),
-            'History': arima_forecast,
+            'Price': arima_forecast,
             'Type': 'Прогноз'
         })
         
         combined = pd.concat([chart_data, forecast_data], ignore_index=True)
         
-        line_chart = alt.Chart(combined).mark_line(point=True).encode(
+        line_chart = alt.Chart(combined).mark_line(point=True, size=3).encode(
             x=alt.X('Period:Q', title='Period'),
-            y=alt.Y('History:Q', title='Price (USD)'),
+            y=alt.Y('Price:Q', title='Price (USD)', scale=alt.Scale(zero=False)),
             color=alt.Color('Type:N', scale=alt.Scale(domain=['История', 'Прогноз'], range=['#1f77b4', '#ff7f0e'])),
-            tooltip=['Period:Q', 'History:Q', 'Type:N']
+            tooltip=['Period:Q', 'Price:Q', 'Type:N']
         ).properties(
             width=800,
             height=400,
-            title=f'{crypto.upper()} - ARIMA Forecast'
+            title=f'{crypto.upper()} - ARIMA Forecast (Window: 50% of {train_period}d)'
         ).interactive()
         
         st.altair_chart(line_chart, use_container_width=True)
@@ -314,11 +332,12 @@ with st.spinner(f"⏳ Загружаю данные и обучаю ARIMA на {
         ).properties(
             width=800,
             height=300,
-            title='Volume Bubbles'
+            title='Volume Bubbles - Red (Bearish) / Green (Bullish)'
         ).interactive()
         
         st.altair_chart(bar_chart, use_container_width=True)
         
+        # Таблица
         st.write("**📊 Последние 10 дней:**")
         display_df = df[['Open time', 'Close']].tail(10).copy()
         display_df['Close'] = display_df['Close'].apply(lambda x: f"${x:,.2f}")
