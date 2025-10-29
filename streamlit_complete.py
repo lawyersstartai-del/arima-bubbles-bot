@@ -11,7 +11,7 @@ MOSCOW_TZ = pytz.timezone('Europe/Moscow')
 
 st.set_page_config(page_title="ARIMA Bot", page_icon="📊", layout="wide")
 st.title("📊 ARIMA + Market Order Bubbles")
-st.markdown("**Прогноз + Telegram отправка каждый час на XX:02**")
+st.markdown("**REST API + Telegram отправка каждый час на XX:02**")
 
 with st.sidebar:
     st.title("⚙️ Параметры")
@@ -21,7 +21,7 @@ with st.sidebar:
     days_history = st.slider("Дней истории", 7, 365, 30)
     st.divider()
     st.success("✅ Telegram подключен")
-    st.info("⏰ Московское время (UTC+3)\n📤 Автоотправка: XX:02\n📊 ARIMA прогноз")
+    st.info("⏰ Московское время (UTC+3)\n📤 Автоотправка: XX:02")
 
 if 'last_send_hour' not in st.session_state:
     st.session_state.last_send_hour = -1
@@ -31,33 +31,38 @@ if 'messages_sent' not in st.session_state:
 def get_moscow_time():
     return datetime.now(MOSCOW_TZ)
 
-def get_historical_klines(symbol, interval, days):
+def get_binance_klines(symbol, interval, days):
+    """Получаем свечи с Binance REST API"""
     try:
-        import ccxt
-        exchange = ccxt.binance()
+        interval_map = {'1h': '1h', '4h': '4h', '1d': '1d'}
+        tf = interval_map.get(interval, '1h')
         
-        timeframe_map = {'1h': '1h', '4h': '4h', '1d': '1d'}
-        tf = timeframe_map.get(interval, '1h')
+        url = "https://api.binance.com/api/v3/klines"
+        params = {
+            'symbol': symbol,
+            'interval': tf,
+            'limit': 1000
+        }
         
-        all_candles = []
-        since = exchange.parse8601((datetime.now() - timedelta(days=days)).isoformat())
+        response = requests.get(url, params=params, timeout=10)
+        klines = response.json()
         
-        while since < exchange.milliseconds():
-            candles = exchange.fetch_ohlcv(symbol, tf, since, limit=1000)
-            if not candles:
-                break
-            all_candles.extend(candles)
-            since = candles[-1][0] + 1
+        df = pd.DataFrame(klines, columns=[
+            'Open time', 'Open', 'High', 'Low', 'Close', 'Volume',
+            'Close time', 'Quote asset volume', 'Number of trades',
+            'Taker buy base asset volume', 'Taker buy quote asset volume', 'Ignore'
+        ])
         
-        df = pd.DataFrame(all_candles, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
-        df['Open time'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df['Open time'] = pd.to_datetime(df['Open time'], unit='ms')
+        for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        
         df = df[['Open time', 'Open', 'High', 'Low', 'Close', 'Volume']]
-        df.drop_duplicates(subset=['Open time'], inplace=True)
-        df.reset_index(drop=True, inplace=True)
+        df.dropna(inplace=True)
         
         return df
     except Exception as e:
-        st.error(f"Ошибка загрузки: {str(e)}")
+        st.error(f"Ошибка Binance API: {str(e)}")
         return None
 
 def calculate_arima_forecast(prices, forecast_steps=7):
@@ -65,15 +70,11 @@ def calculate_arima_forecast(prices, forecast_steps=7):
     if len(prices) < 10:
         return None
     
-    # Используем последние 20 значений для расчета тренда
     recent = prices[-20:]
-    
-    # Расчет простого тренда
     x = np.arange(len(recent))
-    coeffs = np.polyfit(x, recent, 2)  # Полином 2й степени
+    coeffs = np.polyfit(x, recent, 2)
     poly = np.poly1d(coeffs)
     
-    # Прогноз
     future_x = np.arange(len(recent), len(recent) + forecast_steps)
     forecast = poly(future_x)
     
@@ -86,9 +87,7 @@ def calculate_bubbles(df):
     df['Volume_EMA'] = df['Volume'].ewm(span=30, adjust=False).mean()
     df['Volume_STD'] = df['Volume'].rolling(window=30).std()
     
-    df['Upper_Threshold'] = df['Volume_EMA'] + 1.0 * df['Volume_STD']
     df['Lower_Threshold'] = df['Volume_EMA'] + 0.5 * df['Volume_STD']
-    
     df['Bubble_Type'] = 'None'
     
     for i in range(30, len(df)):
@@ -113,8 +112,8 @@ def send_telegram_message(message):
     except:
         return False
 
-def run_analysis(symbol, interval, forecast_steps, days_history):
-    df = get_historical_klines(symbol, interval, days_history)
+def run_analysis(symbol, interval, forecast_steps):
+    df = get_binance_klines(symbol, interval, 30)
     
     if df is None or len(df) < 100:
         return False
@@ -171,7 +170,7 @@ should_send = (current_minute == 2) and (st.session_state.last_send_hour != curr
 
 if should_send:
     with st.spinner("⏳ Отправляю отчёт..."):
-        if run_analysis(symbol, interval, forecast_steps, days_history):
+        if run_analysis(symbol, interval, forecast_steps):
             st.session_state.last_send_hour = current_hour
             st.session_state.messages_sent.append(moscow_time)
             st.success(f"✅ Отчёт отправлен в {moscow_time.strftime('%H:%M:%S')} МСК")
@@ -188,7 +187,7 @@ st.markdown("---")
 st.subheader("🚀 Ручная отправка")
 if st.button("📤 ОТПРАВИТЬ ОТЧЁТ СЕЙЧАС", use_container_width=True, type="primary"):
     with st.spinner("⏳ Отправляю..."):
-        if run_analysis(symbol, interval, forecast_steps, days_history):
+        if run_analysis(symbol, interval, forecast_steps):
             st.session_state.messages_sent.append(get_moscow_time())
             st.success("✅ Отчёт отправлен!")
         else:
@@ -198,7 +197,7 @@ st.markdown("---")
 st.subheader("📊 Данные")
 
 with st.spinner("⏳ Загружаю данные..."):
-    df = get_historical_klines(symbol, interval, days_history)
+    df = get_binance_klines(symbol, interval, 30)
     
     if df is not None and len(df) > 0:
         st.write("**📊 Последние 10 свечей:**")
@@ -225,4 +224,4 @@ if st.session_state.messages_sent:
 
 st.markdown("""<script>setTimeout(() => window.location.reload(), 60000);</script>""", unsafe_allow_html=True)
 st.divider()
-st.markdown("<div style='text-align:center;color:gray;font-size:11px;'>🤖 ARIMA Bubbles | CCXT + Telegram | Московское время (UTC+3)</div>", unsafe_allow_html=True)
+st.markdown("<div style='text-align:center;color:gray;font-size:11px;'>🤖 ARIMA Bubbles | Binance REST API | Telegram | Московское время</div>", unsafe_allow_html=True)
