@@ -4,6 +4,7 @@ import numpy as np
 from datetime import datetime, timedelta
 import requests
 import pytz
+import altair as alt
 
 TELEGRAM_BOT_TOKEN = "5628451765:AAF3eghUBVePX-I_j3Rg2WvWKFGkx4u1F7M"
 TELEGRAM_CHAT_ID = "204683255"
@@ -11,7 +12,7 @@ MOSCOW_TZ = pytz.timezone('Europe/Moscow')
 
 st.set_page_config(page_title="ARIMA Bot", page_icon="📊", layout="wide")
 st.title("📊 ARIMA + Market Order Bubbles")
-st.markdown("**CoinGecko + Графики + Точность + Рекомендации + Telegram**")
+st.markdown("**CoinGecko + Altair Графики (TradingView стиль) + Telegram**")
 
 with st.sidebar:
     st.title("⚙️ ПАРАМЕТРЫ")
@@ -32,17 +33,15 @@ with st.sidebar:
     if forecast_type == "Часы":
         hours = st.selectbox("Часовой таймфрейм:", [1, 4, 8, 12])
         forecast_period_label = f"{hours}h"
-        days_for_chart = 30
     else:
         days = st.slider("Дней для прогноза:", 7, 365, 30)
         forecast_period_label = f"{days}d"
-        days_for_chart = days
     
     forecast_steps = st.number_input("Шагов прогноза", min_value=1, max_value=500, value=7)
     
     st.divider()
     st.success("✅ Telegram подключен")
-    st.info(f"📚 Обучение: {train_period}d\n🔮 Период: {forecast_period_label}")
+    st.info(f"📚 Обучение: {train_period}d\n🔮 Период: {forecast_period_label}\n📊 Altair Charts")
 
 if 'messages_sent' not in st.session_state:
     st.session_state.messages_sent = []
@@ -77,11 +76,9 @@ def get_coingecko_data(crypto_id, days=365):
         return None
 
 def calculate_arima_forecast(prices, forecast_steps, train_period):
-    """ARIMA прогноз с выбранным периодом обучения"""
     if len(prices) < 10:
         return None
     
-    # Используем последние train_period дней для обучения
     train_data = prices[-train_period:] if len(prices) > train_period else prices
     
     if len(train_data) < 10:
@@ -96,11 +93,9 @@ def calculate_arima_forecast(prices, forecast_steps, train_period):
     return poly(future_x)
 
 def calculate_accuracy(prices, forecast, train_period):
-    """Точность прогноза на выбранном периоде обучения"""
     if len(prices) < 20:
         return None, None, None
     
-    # Тренируемся на train_period дней
     train_data = prices[-train_period:] if len(prices) > train_period else prices
     test_size = max(5, len(train_data) // 5)
     
@@ -143,7 +138,7 @@ def calculate_bubbles(df):
     
     return df
 
-def send_telegram(message):
+def send_telegram_message(message):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         params = {'chat_id': TELEGRAM_CHAT_ID, 'text': message, 'parse_mode': 'HTML'}
@@ -153,7 +148,6 @@ def send_telegram(message):
         return False
 
 def get_recommendation(forecast, current_price, accuracy):
-    """Рекомендация торговли"""
     forecast_avg = np.mean(forecast)
     change_pct = ((forecast_avg - current_price) / current_price) * 100
     
@@ -173,7 +167,6 @@ def get_recommendation(forecast, current_price, accuracy):
 
 def run_analysis(crypto_id, forecast_steps, train_period, forecast_period_label):
     try:
-        # Загружаем максимум данных (365 дней)
         df = get_coingecko_data(crypto_id, 365)
         
         if df is None or len(df) < train_period:
@@ -217,7 +210,7 @@ def run_analysis(crypto_id, forecast_steps, train_period, forecast_period_label)
         
         msg += f"\n{recommendation}\n"
         
-        if send_telegram(msg):
+        if send_telegram_message(msg):
             st.session_state.messages_sent.append(moscow_time)
             return True
         return False
@@ -241,7 +234,7 @@ with col3:
 st.markdown("---")
 st.subheader("🚀 Отправка в Telegram")
 if st.button("📤 ОТПРАВИТЬ ОТЧЁТ", use_container_width=True, type="primary"):
-    with st.spinner("⏳ Загружаю данные и обучаю ARIMA..."):
+    with st.spinner("⏳ Загружаю данные, обучаю ARIMA..."):
         if run_analysis(crypto, forecast_steps, train_period, forecast_period_label):
             st.success("✅ Отчёт отправлен в Telegram!")
         else:
@@ -269,46 +262,75 @@ with st.spinner(f"⏳ Загружаю данные и обучаю ARIMA на {
         with col4:
             st.metric("📚 Обучение", f"{train_period}d")
         
-        # Рекомендация
         if arima_forecast is not None:
             recommendation = get_recommendation(arima_forecast, prices[-1], accuracy)
             st.write(f"### {recommendation}")
         
-        # ГРАФИК ЦЕНЫ
-        if arima_forecast is not None:
-            st.write(f"**📈 ГРАФИК - История (последние 30 дней) и Прогноз ({forecast_period_label}):**")
-            
-            history_prices = prices[-30:]
-            
-            chart_df = pd.DataFrame({
-                'История': list(history_prices) + [np.nan] * len(arima_forecast),
-                'Прогноз': [np.nan] * len(history_prices) + list(arima_forecast)
-            })
-            
-            st.line_chart(chart_df, use_container_width=True)
+        # ГРАФИК ЦЕНЫ В СТИЛЕ TRADINGVIEW
+        st.write("**📈 ГРАФИК - История и Прогноз (TradingView стиль):**")
+        
+        history_prices = prices[-50:]
+        chart_data = pd.DataFrame({
+            'Period': range(len(history_prices)),
+            'History': history_prices,
+            'Type': 'История'
+        })
+        
+        forecast_data = pd.DataFrame({
+            'Period': range(len(history_prices)-1, len(history_prices)-1+len(arima_forecast)),
+            'History': arima_forecast,
+            'Type': 'Прогноз'
+        })
+        
+        combined = pd.concat([chart_data, forecast_data], ignore_index=True)
+        
+        line_chart = alt.Chart(combined).mark_line(point=True).encode(
+            x=alt.X('Period:Q', title='Period'),
+            y=alt.Y('History:Q', title='Price (USD)'),
+            color=alt.Color('Type:N', scale=alt.Scale(domain=['История', 'Прогноз'], range=['#1f77b4', '#ff7f0e'])),
+            tooltip=['Period:Q', 'History:Q', 'Type:N']
+        ).properties(
+            width=800,
+            height=400,
+            title=f'{crypto.upper()} - ARIMA Forecast'
+        ).interactive()
+        
+        st.altair_chart(line_chart, use_container_width=True)
         
         # ГРАФИК ПУЗЫРЕЙ
         st.write("**🔴🟢 ГРАФИК ПУЗЫРЕЙ (Объём):**")
         
-        bubble_df = pd.DataFrame({
-            'Красные': [1 if t == 'Red' else 0 for t in df_bubbles['Bubble_Type']],
-            'Зелёные': [1 if t == 'Green' else 0 for t in df_bubbles['Bubble_Type']],
+        bubble_data = pd.DataFrame({
+            'Period': range(len(df_bubbles)),
+            'Volume': df_bubbles['Volume'].values,
+            'Bubble': df_bubbles['Bubble_Type'].values
         })
         
-        st.bar_chart(bubble_df, use_container_width=True)
+        bar_chart = alt.Chart(bubble_data).mark_bar().encode(
+            x=alt.X('Period:Q', title='Period'),
+            y=alt.Y('Volume:Q', title='Volume'),
+            color=alt.Color('Bubble:N', scale=alt.Scale(domain=['Red', 'Green', 'None'], range=['#FF4444', '#44FF44', '#4444FF'])),
+            tooltip=['Period:Q', 'Volume:Q', 'Bubble:N']
+        ).properties(
+            width=800,
+            height=300,
+            title='Volume Bubbles'
+        ).interactive()
+        
+        st.altair_chart(bar_chart, use_container_width=True)
         
         st.write("**📊 Последние 10 дней:**")
         display_df = df[['Open time', 'Close']].tail(10).copy()
         display_df['Close'] = display_df['Close'].apply(lambda x: f"${x:,.2f}")
         display_df['Open time'] = display_df['Open time'].dt.strftime('%Y-%m-%d')
         st.dataframe(display_df, use_container_width=True, hide_index=True)
-    else:
-        st.error(f"❌ Недостаточно данных для обучения на {train_period} дней")
 
 st.markdown("---")
-st.subheader("📤 История")
+st.subheader("📤 История отправок")
 if st.session_state.messages_sent:
     data = [{"Время": t.strftime('%Y-%m-%d %H:%M:%S')} for t in st.session_state.messages_sent[-10:]]
     st.dataframe(pd.DataFrame(data), use_container_width=True, hide_index=True)
+else:
+    st.info("ℹ️ Отчёты ещё не отправлялись")
 
 st.markdown("""<script>setTimeout(() => window.location.reload(), 60000);</script>""", unsafe_allow_html=True)
