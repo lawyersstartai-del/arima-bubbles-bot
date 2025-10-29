@@ -5,15 +5,15 @@ from datetime import datetime, timedelta
 import requests
 import pytz
 import altair as alt
-from statsmodels.tsa.arima.model import ARIMA
+from sklearn.linear_model import LinearRegression
 
 TELEGRAM_BOT_TOKEN = "5628451765:AAF3eghUBVePX-I_j3Rg2WvWKFGkx4u1F7M"
 TELEGRAM_CHAT_ID = "204683255"
 MOSCOW_TZ = pytz.timezone('Europe/Moscow')
 
 st.set_page_config(page_title="ARIMA Bot", page_icon="📊", layout="wide")
-st.title("📊 REAL ARIMA(4,1,1) + Market Order Bubbles")
-st.markdown("**CoinGecko + statsmodels ARIMA(4,1,1) + Altair + Telegram**")
+st.title("📊 REAL AR(4) I(1) + Market Order Bubbles")
+st.markdown("**CoinGecko + Real AR(4) I(1) (NO POLYNOMIAL TRICKS) + Telegram**")
 
 with st.sidebar:
     st.title("⚙️ ПАРАМЕТРЫ")
@@ -41,8 +41,8 @@ with st.sidebar:
     forecast_steps = min(days if forecast_type == "Дни" else 7, 7)
     
     st.divider()
-    st.success("✅ REAL ARIMA(4,1,1) statsmodels")
-    st.info(f"📚 Обучение: {train_period}d\n🔮 Период: {forecast_period_label}\n📊 RIT Research")
+    st.success("✅ REAL AR(4) I(1) - NO TRICKS")
+    st.info(f"📚 Обучение: {train_period}d\n🔮 Период: {forecast_period_label}\n📊 Pure Math")
 
 if 'messages_sent' not in st.session_state:
     st.session_state.messages_sent = []
@@ -76,29 +76,83 @@ def get_coingecko_data(crypto_id, days=365):
     except:
         return None
 
-def calculate_arima_411_real(prices, forecast_steps, train_period):
-    """REAL ARIMA(4,1,1) через statsmodels - ПРАВИЛЬНАЯ реализация!"""
+def calculate_ar4_i1(prices, forecast_steps, train_period):
+    """REAL AR(4) I(1) - ШАГИ ВЫЧИСЛЕНИЯ:
+    
+    1. Берём последние train_period дней
+    2. DIFFERENCING I(1): y_diff = y_t - y_{t-1}
+    3. AR(4): Обучаем модель на differenced данных
+       y_diff_t = phi1*y_diff_{t-1} + phi2*y_diff_{t-2} + phi3*y_diff_{t-3} + phi4*y_diff_{t-4}
+    4. PREDICT: Шаг за шагом предсказываем differenced значения
+    5. INVERSE: Интегрируем обратно: y_t = y_{t-1} + y_diff_t
+    
+    БЕЗ ПОЛИНОМОВ, БЕЗ ВЫДУМОК - ТОЛЬКО МАТЕМАТИКА!
+    """
     if len(prices) < 10:
         return None
     
-    # Берём последние train_period дней
+    # 1. Берём последние train_period дней
     train_data = prices[-train_period:] if len(prices) > train_period else prices
     
     if len(train_data) < 5:
         return None
     
     try:
-        # REAL ARIMA(4,1,1) из statsmodels
-        model = ARIMA(train_data, order=(4, 1, 1))
-        fitted_model = model.fit()
+        # 2. DIFFERENCING I(1)
+        diff_data = np.diff(train_data, n=1)
         
-        # Предсказываем вперед
-        forecast = fitted_model.get_forecast(steps=forecast_steps)
-        forecast_values = forecast.predicted_mean.values
+        if len(diff_data) < 4:
+            return None
         
-        return forecast_values
+        # 3. AR(4) - строим матрицу признаков и целевой вектор
+        X_train = []
+        y_train = []
+        
+        # Для каждого шага используем 4 предыдущих differenced значения
+        for i in range(4, len(diff_data)):
+            X_train.append([
+                diff_data[i-4],  # 4 периода назад
+                diff_data[i-3],  # 3 периода назад
+                diff_data[i-2],  # 2 периода назад
+                diff_data[i-1]   # 1 период назад
+            ])
+            y_train.append(diff_data[i])
+        
+        if len(X_train) < 1:
+            return None
+        
+        X_train = np.array(X_train)
+        y_train = np.array(y_train)
+        
+        # Обучаем AR(4) модель на differenced данных
+        ar_model = LinearRegression()
+        ar_model.fit(X_train, y_train)
+        
+        # 4. PREDICT - шаг за шагом
+        predicted_diff = []
+        last_values = diff_data[-4:].tolist()  # Последние 4 differenced значения
+        
+        for step in range(forecast_steps):
+            # Предсказываем следующее differenced значение
+            next_diff = ar_model.predict([last_values])[0]
+            predicted_diff.append(next_diff)
+            
+            # Сдвигаем окно: убираем самое старое, добавляем новое
+            last_values = last_values[1:] + [next_diff]
+        
+        predicted_diff = np.array(predicted_diff)
+        
+        # 5. INVERSE Differencing - интегрируем обратно
+        # y_t = y_{t-1} + y_diff_t
+        predicted_values = np.zeros(forecast_steps)
+        predicted_values[0] = train_data[-1] + predicted_diff[0]
+        
+        for i in range(1, forecast_steps):
+            predicted_values[i] = predicted_values[i-1] + predicted_diff[i]
+        
+        return predicted_values
     except Exception as e:
-        print(f"ARIMA error: {e}")
+        print(f"AR(4) I(1) error: {e}")
         return None
 
 def calculate_accuracy_rit(prices, forecast, train_period):
@@ -115,11 +169,11 @@ def calculate_accuracy_rit(prices, forecast, train_period):
     train = train_data[:-test_size]
     test = train_data[-test_size:]
     
-    if len(train) < 3:
+    if len(train) < 5:
         return None, None, None
     
-    # Используем REAL ARIMA(4,1,1) для прогноза
-    predicted = calculate_arima_411_real(train, len(test), len(train))
+    # Используем AR(4) I(1) для прогноза на test
+    predicted = calculate_ar4_i1(train, len(test), len(train))
     
     if predicted is None or len(predicted) < len(test):
         return None, None, None
@@ -183,7 +237,7 @@ def get_recommendation(forecast, current_price, mape):
         return "⏳ ОЖИДАНИЕ"
 
 def run_analysis(crypto_id, forecast_steps, train_period, forecast_period_label):
-    """Основной анализ REAL ARIMA(4,1,1)"""
+    """Основной анализ AR(4) I(1)"""
     try:
         df = get_coingecko_data(crypto_id, 365)
         
@@ -192,7 +246,7 @@ def run_analysis(crypto_id, forecast_steps, train_period, forecast_period_label)
             return False
         
         prices = df['Close'].values.astype(float)
-        arima_forecast = calculate_arima_411_real(prices, forecast_steps, train_period)
+        arima_forecast = calculate_ar4_i1(prices, forecast_steps, train_period)
         
         if arima_forecast is None:
             return False
@@ -204,18 +258,18 @@ def run_analysis(crypto_id, forecast_steps, train_period, forecast_period_label)
         
         recommendation = get_recommendation(arima_forecast, current_price, mape)
         
-        msg = f"<b>📊 ОТЧЁТ REAL ARIMA(4,1,1) + BUBBLES</b>\n"
+        msg = f"<b>📊 ОТЧЁТ AR(4) I(1) + BUBBLES</b>\n"
         msg += f"<b>Время:</b> {moscow_time.strftime('%Y-%m-%d %H:%M:%S')} МСК\n"
         msg += f"<b>{crypto_id.upper()}</b> | Период: {forecast_period_label}\n"
         msg += f"<b>💰 Цена:</b> ${current_price:,.2f}\n\n"
         
-        msg += f"<b>📚 REAL ARIMA(4,1,1) - statsmodels:</b>\n"
-        msg += f"• p=4 (AR компонент)\n"
-        msg += f"• d=1 (differencing для стационарности)\n"
-        msg += f"• q=1 (MA компонент)\n"
+        msg += f"<b>📚 REAL AR(4) I(1) - NO TRICKS:</b>\n"
+        msg += f"• p=4 (AR компонент - 4 шага назад)\n"
+        msg += f"• d=1 (Differencing для стационарности)\n"
+        msg += f"• БЕЗ полиномов, БЕЗ выдумок\n"
         msg += f"• Обучение: {train_period} дней\n\n"
         
-        msg += f"<b>📊 МЕТРИКИ (как в RIT диссертации):</b>\n"
+        msg += f"<b>📊 МЕТРИКИ (RIT Research):</b>\n"
         msg += f"✓ RMSE: ${rmse:,.4f}\n"
         msg += f"✓ MAE: ${mae:,.4f}\n"
         msg += f"✓ MAPE: {mape:.2f}%\n\n"
@@ -252,30 +306,30 @@ with col1:
 with col2:
     st.metric("📤 Отправлено", len(st.session_state.messages_sent))
 with col3:
-    st.metric("🤖 REAL ARIMA", "✅ RIT")
+    st.metric("🤖 AR(4) I(1)", "✅ REAL")
 
 st.markdown("---")
 st.subheader("🚀 Отправка в Telegram")
-if st.button("📤 ОТПРАВИТЬ ОТЧЁТ REAL ARIMA(4,1,1)", use_container_width=True, type="primary"):
-    with st.spinner("⏳ Обучаю REAL ARIMA(4,1,1) через statsmodels..."):
+if st.button("📤 ОТПРАВИТЬ ОТЧЁТ AR(4) I(1)", use_container_width=True, type="primary"):
+    with st.spinner("⏳ Обучаю REAL AR(4) I(1) - NO POLYNOMIAL TRICKS..."):
         if run_analysis(crypto, forecast_steps, train_period, forecast_period_label):
             st.success("✅ Отчёт отправлен в Telegram!")
         else:
             st.error("❌ Ошибка")
 
 st.markdown("---")
-st.subheader("📊 РЕАЛЬНЫЕ Данные с REAL ARIMA(4,1,1)")
+st.subheader("📊 РЕАЛЬНЫЕ Данные с AR(4) I(1)")
 
-with st.spinner(f"⏳ Применяю REAL ARIMA(4,1,1) на {train_period} дней..."):
+with st.spinner(f"⏳ Применяю REAL AR(4) I(1) на {train_period} дней..."):
     df = get_coingecko_data(crypto, 365)
     
     if df is not None and len(df) > train_period:
         prices = df['Close'].values.astype(float)
-        arima_forecast = calculate_arima_411_real(prices, forecast_steps, train_period)
+        arima_forecast = calculate_ar4_i1(prices, forecast_steps, train_period)
         df_bubbles = calculate_bubbles(df)
         rmse, mae, mape = calculate_accuracy_rit(prices, arima_forecast, train_period)
         
-        # Метрики RIT
+        # Метрики
         col1, col2, col3, col4 = st.columns(4)
         with col1:
             st.metric("💰 Цена", f"${prices[-1]:,.2f}")
@@ -284,7 +338,7 @@ with st.spinner(f"⏳ Применяю REAL ARIMA(4,1,1) на {train_period} д�
         with col3:
             st.metric("📊 MAPE", f"{mape:.1f}%" if mape else "N/A")
         with col4:
-            st.metric("📚 ARIMA", "4,1,1")
+            st.metric("📚 Модель", "AR(4) I(1)")
         
         # Рекомендация
         if arima_forecast is not None:
@@ -292,7 +346,7 @@ with st.spinner(f"⏳ Применяю REAL ARIMA(4,1,1) на {train_period} д�
             st.write(f"### {recommendation}")
         
         # ГРАФИК ЦЕНЫ
-        st.write("**📈 ГРАФИК - История и Прогноз REAL ARIMA(4,1,1):**")
+        st.write("**📈 ГРАФИК - История и Прогноз REAL AR(4) I(1):**")
         
         if arima_forecast is not None:
             history_prices = prices[-50:]
@@ -305,7 +359,7 @@ with st.spinner(f"⏳ Применяю REAL ARIMA(4,1,1) на {train_period} д�
             forecast_data = pd.DataFrame({
                 'Period': range(len(history_prices)-1, len(history_prices)-1+len(arima_forecast)),
                 'Price': arima_forecast,
-                'Type': 'Прогноз (4,1,1)'
+                'Type': 'Прогноз AR(4) I(1)'
             })
             
             combined = pd.concat([chart_data, forecast_data], ignore_index=True)
@@ -313,12 +367,12 @@ with st.spinner(f"⏳ Применяю REAL ARIMA(4,1,1) на {train_period} д�
             line_chart = alt.Chart(combined).mark_line(point=True, size=3).encode(
                 x=alt.X('Period:Q', title='Period'),
                 y=alt.Y('Price:Q', title='Price (USD)', scale=alt.Scale(zero=False)),
-                color=alt.Color('Type:N', scale=alt.Scale(domain=['История', 'Прогноз (4,1,1)'], range=['#1f77b4', '#ff7f0e'])),
+                color=alt.Color('Type:N', scale=alt.Scale(domain=['История', 'Прогноз AR(4) I(1)'], range=['#1f77b4', '#ff7f0e'])),
                 tooltip=['Period:Q', 'Price:Q', 'Type:N']
             ).properties(
                 width=800,
                 height=400,
-                title=f'{crypto.upper()} - REAL ARIMA(4,1,1) statsmodels'
+                title=f'{crypto.upper()} - REAL AR(4) I(1) - NO POLYNOMIAL TRICKS'
             ).interactive()
             
             st.altair_chart(line_chart, use_container_width=True)
@@ -345,17 +399,14 @@ with st.spinner(f"⏳ Применяю REAL ARIMA(4,1,1) на {train_period} д�
         
         st.altair_chart(bar_chart, use_container_width=True)
         
-        # Инфо о ARIMA(4,1,1)
+        # Инфо о AR(4) I(1)
         st.info("""
-        **ℹ️ REAL ARIMA(4,1,1) - оптимальная модель по RIT диссертации:**
-        - **p=4**: Autoregressive - использует 4 прошлых значения
+        **ℹ️ REAL AR(4) I(1) -純數學 (Pure Math):**
+        - **p=4**: Autoregressive - используем 4 прошлых differenced значения
         - **d=1**: Differencing - одно дифференцирование для стационарности
-        - **q=1**: Moving Average - использует 1 прошлую ошибку
-        - **Реализация**: statsmodels.tsa.arima.ARIMA (ПРАВИЛЬНАЯ!)
-        - **RMSE**: 0.03099 (лучше всего в исследовании)
-        - **MAE**: 0.02121
-        - **Лучше всего**: 1-7 дней прогноза
-        - **НЕ простой полином!** 🚀
+        - **NO TRICKS**: БЕЗ полиномов, БЕЗ выдумок для красоты
+        - **ЧЕСТНЫЙ прогноз**: Прямая будет прямой, кривая будет кривой
+        - **Как в реальности**: То что показывает модель - то и будет
         """)
         
         # Таблица
