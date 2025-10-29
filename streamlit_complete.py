@@ -11,17 +11,38 @@ MOSCOW_TZ = pytz.timezone('Europe/Moscow')
 
 st.set_page_config(page_title="ARIMA Bot", page_icon="📊", layout="wide")
 st.title("📊 ARIMA + Market Order Bubbles")
-st.markdown("**CoinGecko + Streamlit График + Telegram**")
+st.markdown("**CoinGecko + Графики + Точность + Рекомендации + Telegram**")
 
 with st.sidebar:
-    st.title("⚙️ Параметры")
+    st.title("⚙️ ПАРАМЕТРЫ")
+    
+    st.subheader("📊 Данные для анализа")
     crypto = st.text_input("Криптовалюта", value="bitcoin")
-    days_history = st.slider("Дней истории:", 7, 365, 30)
+    
+    st.subheader("📚 Обучение ARIMA")
+    train_period = st.selectbox(
+        "Период обучения (на каких данных учиться):",
+        [7, 14, 30, 90, 180, 365],
+        format_func=lambda x: f"{x} дней"
+    )
+    
+    st.subheader("🔮 Предсказание")
+    forecast_type = st.radio("Тип прогноза:", ["Часы", "Дни"])
+    
+    if forecast_type == "Часы":
+        hours = st.selectbox("Часовой таймфрейм:", [1, 4, 8, 12])
+        forecast_period_label = f"{hours}h"
+        days_for_chart = 30
+    else:
+        days = st.slider("Дней для прогноза:", 7, 365, 30)
+        forecast_period_label = f"{days}d"
+        days_for_chart = days
+    
     forecast_steps = st.number_input("Шагов прогноза", min_value=1, max_value=500, value=7)
     
     st.divider()
     st.success("✅ Telegram подключен")
-    st.info(f"📊 {days_history} дней\n📈 Встроенный график")
+    st.info(f"📚 Обучение: {train_period}d\n🔮 Период: {forecast_period_label}")
 
 if 'messages_sent' not in st.session_state:
     st.session_state.messages_sent = []
@@ -29,7 +50,7 @@ if 'messages_sent' not in st.session_state:
 def get_moscow_time():
     return datetime.now(MOSCOW_TZ)
 
-def get_coingecko_data(crypto_id, days=30):
+def get_coingecko_data(crypto_id, days=365):
     try:
         url = f"https://api.coingecko.com/api/v3/coins/{crypto_id}/market_chart"
         params = {'vs_currency': 'usd', 'days': days, 'interval': 'daily'}
@@ -55,17 +76,53 @@ def get_coingecko_data(crypto_id, days=30):
     except:
         return None
 
-def calculate_arima_forecast(prices, forecast_steps=7):
+def calculate_arima_forecast(prices, forecast_steps, train_period):
+    """ARIMA прогноз с выбранным периодом обучения"""
     if len(prices) < 10:
         return None
     
-    recent = prices[-20:]
+    # Используем последние train_period дней для обучения
+    train_data = prices[-train_period:] if len(prices) > train_period else prices
+    
+    if len(train_data) < 10:
+        return None
+    
+    recent = train_data[-20:] if len(train_data) >= 20 else train_data
     x = np.arange(len(recent))
     coeffs = np.polyfit(x, recent, 2)
     poly = np.poly1d(coeffs)
     
     future_x = np.arange(len(recent), len(recent) + forecast_steps)
     return poly(future_x)
+
+def calculate_accuracy(prices, forecast, train_period):
+    """Точность прогноза на выбранном периоде обучения"""
+    if len(prices) < 20:
+        return None, None, None
+    
+    # Тренируемся на train_period дней
+    train_data = prices[-train_period:] if len(prices) > train_period else prices
+    test_size = max(5, len(train_data) // 5)
+    
+    if test_size < 3 or len(train_data) < 15:
+        return None, None, None
+    
+    train = train_data[:-test_size]
+    test = train_data[-test_size:]
+    
+    x = np.arange(len(train))
+    coeffs = np.polyfit(x, train, 2)
+    poly = np.poly1d(coeffs)
+    
+    predicted = poly(np.arange(len(train), len(train) + test_size))
+    
+    rmse = np.sqrt(np.mean((test - predicted) ** 2))
+    mae = np.mean(np.abs(test - predicted))
+    
+    accuracy = 100 - (mae / np.mean(test)) * 100
+    accuracy = max(0, min(100, accuracy))
+    
+    return rmse, mae, accuracy
 
 def calculate_bubbles(df):
     df = df.copy()
@@ -95,46 +152,70 @@ def send_telegram(message):
     except:
         return False
 
-def run_analysis(crypto_id, forecast_steps, days_history):
+def get_recommendation(forecast, current_price, accuracy):
+    """Рекомендация торговли"""
+    forecast_avg = np.mean(forecast)
+    change_pct = ((forecast_avg - current_price) / current_price) * 100
+    
+    if accuracy < 50:
+        return "⚠️ НИЗКАЯ ТОЧНОСТЬ - НЕ НАДЕЖНО"
+    
+    if change_pct > 2 and accuracy > 65:
+        return "🎯 СИЛЬНАЯ ПОКУПКА 📈"
+    elif change_pct > 0.5 and accuracy > 60:
+        return "📈 ПОКУПКА"
+    elif change_pct < -2 and accuracy > 65:
+        return "🎯 СИЛЬНАЯ ПРОДАЖА 📉"
+    elif change_pct < -0.5 and accuracy > 60:
+        return "📉 ПРОДАЖА"
+    else:
+        return "⏳ ОЖИДАНИЕ"
+
+def run_analysis(crypto_id, forecast_steps, train_period, forecast_period_label):
     try:
-        df = get_coingecko_data(crypto_id, days_history)
+        # Загружаем максимум данных (365 дней)
+        df = get_coingecko_data(crypto_id, 365)
         
-        if df is None or len(df) < 10:
-            st.error("❌ Недостаточно данных")
+        if df is None or len(df) < train_period:
+            st.error(f"❌ Недостаточно данных (нужно минимум {train_period} дней)")
             return False
         
         prices = df['Close'].values.astype(float)
-        arima_forecast = calculate_arima_forecast(prices, forecast_steps)
+        arima_forecast = calculate_arima_forecast(prices, forecast_steps, train_period)
         
         if arima_forecast is None:
             return False
         
+        rmse, mae, accuracy = calculate_accuracy(prices, arima_forecast, train_period)
         df_with_bubbles = calculate_bubbles(df)
         current_price = prices[-1]
         moscow_time = get_moscow_time()
         
+        recommendation = get_recommendation(arima_forecast, current_price, accuracy)
+        
         msg = f"<b>📊 ОТЧЁТ ARIMA + BUBBLES</b>\n"
         msg += f"<b>Время:</b> {moscow_time.strftime('%Y-%m-%d %H:%M:%S')} МСК\n"
-        msg += f"<b>{crypto_id.upper()}</b> | {days_history}d\n"
+        msg += f"<b>{crypto_id.upper()}</b> | Период: {forecast_period_label}\n"
         msg += f"<b>💰 Цена:</b> ${current_price:,.2f}\n\n"
         
-        msg += f"<b>📈 Прогноз на {forecast_steps} дней:</b>\n"
+        msg += f"<b>📚 ОБУЧЕНИЕ ARIMA:</b> {train_period} дней\n\n"
+        
+        msg += f"<b>📊 ТОЧНОСТЬ ПРОГНОЗА:</b>\n"
+        msg += f"✓ Accuracy: {accuracy:.1f}%\n"
+        msg += f"✓ RMSE: ${rmse:,.2f}\n"
+        msg += f"✓ MAE: ${mae:,.2f}\n\n"
+        
+        msg += f"<b>📈 Прогноз на {forecast_steps} периодов:</b>\n"
         for i, price in enumerate(arima_forecast[:min(7, forecast_steps)], 1):
             change = ((price - current_price) / current_price) * 100
             arrow = "📈" if change > 0 else "📉"
-            msg += f"{arrow} День {i}: ${price:,.2f} ({change:+.2f}%)\n"
+            msg += f"{arrow} {i}: ${price:,.2f} ({change:+.2f}%)\n"
         
         red_count = len(df_with_bubbles[df_with_bubbles['Bubble_Type'] == 'Red'])
         green_count = len(df_with_bubbles[df_with_bubbles['Bubble_Type'] == 'Green'])
-        msg += f"\n🔴 Красные: {red_count} | 🟢 Зелёные: {green_count}\n"
+        msg += f"\n🔴 Красные пузыри: {red_count} | 🟢 Зелёные пузыри: {green_count}\n"
         
-        forecast_avg = np.mean(arima_forecast)
-        if forecast_avg > current_price * 1.01:
-            msg += "\n🎯 <b>ПОКУПКА</b> 📈"
-        elif forecast_avg < current_price * 0.99:
-            msg += "\n🎯 <b>ПРОДАЖА</b> 📉"
-        else:
-            msg += "\n⏳ <b>ОЖИДАНИЕ</b>"
+        msg += f"\n{recommendation}\n"
         
         if send_telegram(msg):
             st.session_state.messages_sent.append(moscow_time)
@@ -160,39 +241,42 @@ with col3:
 st.markdown("---")
 st.subheader("🚀 Отправка в Telegram")
 if st.button("📤 ОТПРАВИТЬ ОТЧЁТ", use_container_width=True, type="primary"):
-    with st.spinner("⏳ Загружаю данные..."):
-        if run_analysis(crypto, forecast_steps, days_history):
+    with st.spinner("⏳ Загружаю данные и обучаю ARIMA..."):
+        if run_analysis(crypto, forecast_steps, train_period, forecast_period_label):
             st.success("✅ Отчёт отправлен в Telegram!")
         else:
             st.error("❌ Ошибка")
 
 st.markdown("---")
-st.subheader("📊 РЕАЛЬНЫЕ Данные с Графиком")
+st.subheader("📊 РЕАЛЬНЫЕ Данные с Графиками")
 
-with st.spinner("⏳ Загружаю CoinGecko..."):
-    df = get_coingecko_data(crypto, days_history)
+with st.spinner(f"⏳ Загружаю данные и обучаю ARIMA на {train_period} дней..."):
+    df = get_coingecko_data(crypto, 365)
     
-    if df is not None and len(df) > 0:
+    if df is not None and len(df) > train_period:
         prices = df['Close'].values.astype(float)
-        arima_forecast = calculate_arima_forecast(prices, forecast_steps)
+        arima_forecast = calculate_arima_forecast(prices, forecast_steps, train_period)
         df_bubbles = calculate_bubbles(df)
+        rmse, mae, accuracy = calculate_accuracy(prices, arima_forecast, train_period)
         
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
         with col1:
             st.metric("💰 Цена", f"${prices[-1]:,.2f}")
         with col2:
-            if arima_forecast is not None:
-                avg_forecast = np.mean(arima_forecast)
-                change = ((avg_forecast - prices[-1]) / prices[-1]) * 100
-                st.metric("📈 Прогноз", f"${avg_forecast:,.2f}", f"{change:+.2f}%")
+            st.metric("📈 Прогноз", f"${np.mean(arima_forecast):,.2f}")
         with col3:
-            red = len(df_bubbles[df_bubbles['Bubble_Type'] == 'Red'])
-            green = len(df_bubbles[df_bubbles['Bubble_Type'] == 'Green'])
-            st.metric("🔴🟢 Пузыри", f"{red} / {green}")
+            st.metric("📊 Accuracy", f"{accuracy:.1f}%" if accuracy else "N/A")
+        with col4:
+            st.metric("📚 Обучение", f"{train_period}d")
         
-        # ============ ГРАФИК ============
+        # Рекомендация
         if arima_forecast is not None:
-            st.write("**📈 ГРАФИК - История и Прогноз:**")
+            recommendation = get_recommendation(arima_forecast, prices[-1], accuracy)
+            st.write(f"### {recommendation}")
+        
+        # ГРАФИК ЦЕНЫ
+        if arima_forecast is not None:
+            st.write(f"**📈 ГРАФИК - История (последние 30 дней) и Прогноз ({forecast_period_label}):**")
             
             history_prices = prices[-30:]
             
@@ -203,18 +287,28 @@ with st.spinner("⏳ Загружаю CoinGecko..."):
             
             st.line_chart(chart_df, use_container_width=True)
         
+        # ГРАФИК ПУЗЫРЕЙ
+        st.write("**🔴🟢 ГРАФИК ПУЗЫРЕЙ (Объём):**")
+        
+        bubble_df = pd.DataFrame({
+            'Красные': [1 if t == 'Red' else 0 for t in df_bubbles['Bubble_Type']],
+            'Зелёные': [1 if t == 'Green' else 0 for t in df_bubbles['Bubble_Type']],
+        })
+        
+        st.bar_chart(bubble_df, use_container_width=True)
+        
         st.write("**📊 Последние 10 дней:**")
         display_df = df[['Open time', 'Close']].tail(10).copy()
         display_df['Close'] = display_df['Close'].apply(lambda x: f"${x:,.2f}")
         display_df['Open time'] = display_df['Open time'].dt.strftime('%Y-%m-%d')
         st.dataframe(display_df, use_container_width=True, hide_index=True)
+    else:
+        st.error(f"❌ Недостаточно данных для обучения на {train_period} дней")
 
 st.markdown("---")
 st.subheader("📤 История")
 if st.session_state.messages_sent:
     data = [{"Время": t.strftime('%Y-%m-%d %H:%M:%S')} for t in st.session_state.messages_sent[-10:]]
     st.dataframe(pd.DataFrame(data), use_container_width=True, hide_index=True)
-else:
-    st.info("ℹ️ Отчёты ещё не отправлялись")
 
 st.markdown("""<script>setTimeout(() => window.location.reload(), 60000);</script>""", unsafe_allow_html=True)
