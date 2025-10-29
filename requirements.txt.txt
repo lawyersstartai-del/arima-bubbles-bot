@@ -4,4 +4,3 @@ numpy==1.24.3
 requests==2.31.0
 pytz==2023.3
 altair==5.0.1
-scipy==1.11.0

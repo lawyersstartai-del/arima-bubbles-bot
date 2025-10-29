@@ -5,7 +5,6 @@ from datetime import datetime, timedelta
 import requests
 import pytz
 import altair as alt
-from scipy import stats
 
 TELEGRAM_BOT_TOKEN = "5628451765:AAF3eghUBVePX-I_j3Rg2WvWKFGkx4u1F7M"
 TELEGRAM_CHAT_ID = "204683255"
@@ -75,22 +74,6 @@ def get_coingecko_data(crypto_id, days=365):
         return df[['Open time', 'Open', 'High', 'Low', 'Close', 'Volume']]
     except:
         return None
-
-def adf_test(timeseries):
-    """ADF тест для проверки стационарности (как в диссертации)"""
-    from scipy.stats import linregress
-    
-    n = len(timeseries)
-    
-    # Differencing
-    diff = np.diff(timeseries)
-    
-    # Simple ADF check
-    x = np.arange(len(diff))
-    slope, intercept, r_value, p_value, std_err = linregress(x, diff)
-    
-    # p-value < 0.05 = stationary
-    return p_value < 0.05
 
 def calculate_arima_411(prices, forecast_steps, train_period):
     """ARIMA(4,1,1) - OPTIMAL модель из RIT диссертации
