@@ -10,7 +10,7 @@ from statsmodels.tsa.arima.model import ARIMA
 # ------------------- НАСТРОЙКИ -------------------
 st.set_page_config(page_title="ARIMA BTC", page_icon="📈", layout="wide")
 
-# Вставь свои реальные данные:
+# ВСТАВЬ СВОИ ДАННЫЕ:
 TELEGRAM_BOT_TOKEN = "YOUR_BOT_TOKEN"
 TELEGRAM_CHAT_ID   = "YOUR_CHAT_ID"
 
