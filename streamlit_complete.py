@@ -2,26 +2,19 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from datetime import datetime
-import requests
 import pytz
+import requests
 import altair as alt
-from statsmodels.tsa.arima.model import ARIMA
 
-st.set_page_config(page_title="ARIMA BTC", page_icon="📈", layout="wide")
+# Надёжный импорт ARIMA под разную версию statsmodels
+try:
+    from statsmodels.tsa.arima.model import ARIMA                 # Новый путь (рекомендуется)
+except ImportError:
+    from statsmodels.tsa.arima_model import ARIMA                 # Старый путь (fallback)
+
 MOSCOW_TZ = pytz.timezone("Europe/Moscow")
 
-# -------------------- UI --------------------
-st.title("📈 ARIMA(4,1,1) — Bitcoin (CoinGecko)")
-with st.sidebar:
-    crypto = st.text_input("Криптовалюта (CoinGecko id)", value="bitcoin")
-    train_period = st.selectbox("Период обучения (дней)", [30, 60, 90, 180, 365], index=3)
-    steps = st.slider("Горизонт прогноза (дней)", 1, 14, 7)
-    use_log = st.checkbox("Лог-трансформация (рекомендуется)", True)
-    st.caption("Совет: держи горизонт 1–7 дней, чтобы избежать «выпрямления» на дальнем хвосте.")
-
-# -------------------- Data --------------------
-@st.cache_data(show_spinner=False, ttl=3600)
-def load_coingecko_daily(coin_id: str, days: int = 730):
+def load_coingecko_daily(coin_id, days=730):
     url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
     params = {"vs_currency": "usd", "days": days, "interval": "daily"}
     r = requests.get(url, params=params, timeout=20)
@@ -33,37 +26,41 @@ def load_coingecko_daily(coin_id: str, days: int = 730):
     df = df[["date", "close"]].drop_duplicates("date").reset_index(drop=True)
     return df
 
-def arima_forecast(y: np.ndarray, steps: int, order=(4,1,1), use_log=True) -> np.ndarray | None:
-    if len(y) < max(30, order[0] + order[2] + 5):
-        return None
+def arima_forecast(y, steps=7, order=(4,1,1), use_log=True):
     y = np.asarray(y, dtype=float)
     y_tr = np.log(y) if use_log else y
     model = ARIMA(y_tr, order=order, enforce_stationarity=False, enforce_invertibility=False)
-    res = model.fit(method="statespace", disp=0)
+    res = model.fit()
     fc = res.forecast(steps=steps)
     return np.exp(fc) if use_log else np.asarray(fc, dtype=float)
 
-def backtest_metrics(y: np.ndarray, order=(4,1,1), use_log=True):
-    # простая holdout-проверка: 80/20
+def backtest_metrics(y, order=(4,1,1), use_log=True):
     n = len(y)
     if n < 50:
         return None, None, None
     split = int(n * 0.8)
     train, test = y[:split], y[split:]
-    if len(test) < 5:
+    if len(test) < 2:
         return None, None, None
     y_tr = np.log(train) if use_log else train
     model = ARIMA(y_tr, order=order, enforce_stationarity=False, enforce_invertibility=False)
-    res = model.fit(method="statespace", disp=0)
+    res = model.fit()
     fc = res.forecast(steps=len(test))
     fc = np.exp(fc) if use_log else np.asarray(fc, dtype=float)
-
     rmse = float(np.sqrt(np.mean((test - fc) ** 2)))
     mae = float(np.mean(np.abs(test - fc)))
     mape = float(np.mean(np.abs((test - fc) / (test + 1e-9))) * 100)
     return rmse, mae, mape
 
-# -------------------- Run --------------------
+st.set_page_config(page_title="ARIMA BTC", page_icon="📈", layout="wide")
+st.title("📈 ARIMA(4,1,1) — Bitcoin (CoinGecko)")
+with st.sidebar:
+    crypto = st.text_input("Криптовалюта (CoinGecko id)", value="bitcoin")
+    train_period = st.selectbox("Период обучения (дней)", [30, 60, 90, 180, 365], index=3)
+    steps = st.slider("Горизонт прогноза (дней)", 1, 14, 7)
+    use_log = st.checkbox("Лог-трансформация (рекомендуется)", True)
+    st.caption("Совет: держи горизонт 1–7 дней, чтобы избежать 'выпрямления' на дальнем хвосте.")
+
 try:
     df = load_coingecko_daily(crypto, days=max(365, train_period + 30))
     st.success(f"Загружено {len(df)} дневных точек")
@@ -81,7 +78,6 @@ if fc is None:
 
 rmse, mae, mape = backtest_metrics(y_all, order=(4,1,1), use_log=use_log)
 
-# -------------------- Metrics --------------------
 col1, col2, col3, col4 = st.columns(4)
 with col1:
     st.metric("Текущая цена", f"${y_all[-1]:,.2f}")
@@ -92,7 +88,6 @@ with col3:
 with col4:
     st.metric("Модель", "ARIMA(4,1,1)")
 
-# -------------------- Chart --------------------
 hist_tail = min(100, len(y_all))
 hist = pd.DataFrame({
     "idx": list(range(hist_tail)),
