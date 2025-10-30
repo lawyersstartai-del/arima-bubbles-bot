@@ -1,8 +1,7 @@
 streamlit==1.28.0
-pandas==2.0.3
-numpy==1.24.3
-requests==2.31.0
-pytz==2023.3
-altair==5.0.1
-scipy==1.11.0
-statsmodels==0.14.1
+pandas
+numpy
+requests
+scipy
+statsmodels==0.13.5
+matplotlib
